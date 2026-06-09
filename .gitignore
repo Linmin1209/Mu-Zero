@@ -19,12 +19,27 @@ __pycache__/
 # ML / experiment outputs
 wandb/
 outputs/
+output/
 logs/
 runs/
 out/
+work/
 recordings/
 plots/
 *.npz
+*.csv
+!examples/**/*.csv
+!gr00t/**/*.csv
+
+# Local backup / debug artifacts
+*.bak*
+assets.bak*/
+.hf_download_cache/
+expert_replay_*.csv
+one_step_mapping_results.csv
+
+# Vendored locally but installed via pip during sim setup
+external_dependencies/robosuite_official/
 
 # C extensions
 *.so

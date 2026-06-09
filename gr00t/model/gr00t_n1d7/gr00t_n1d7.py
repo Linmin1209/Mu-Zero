@@ -25,6 +25,9 @@ from transformers.feature_extraction_utils import BatchFeature
 import tree
 
 from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
+from gr00t.model.modules.component_action.adaptive_embodiment_action_head import (
+    AdaptiveEmbodimentActionHead,
+)
 from gr00t.model.modules.dit import AlternateVLDiT, DiT, SelfAttentionTransformer
 from gr00t.model.modules.embodiment_conditioned_mlp import (
     CategorySpecificMLP,
@@ -474,7 +477,7 @@ class Gr00tN1d7ActionHead(nn.Module):
 
 
 def get_backbone_cls(config: Gr00tN1d7Config):
-    if "nvidia/Cosmos-Reason2" in config.model_name or "Qwen/Qwen3-VL" in config.model_name:
+    if "Cosmos-Reason2" in str(config.model_name) or "Qwen/Qwen3-VL" in str(config.model_name):
         # We import here as Qwen3Backbone depends on newer transformers versions than the rest of the code.
         from gr00t.model.modules.qwen3_backbone import Qwen3Backbone
 
@@ -513,6 +516,9 @@ class Gr00tN1d7(PreTrainedModel):
         self.config = config
 
         backbone_cls = get_backbone_cls(config)
+        from gr00t.model.modules.qwen3_motion import motion_config_from_model_config
+
+        motion_config = motion_config_from_model_config(config)
         self.backbone = backbone_cls(
             model_name=config.model_name,
             tune_llm=config.tune_llm,
@@ -524,16 +530,23 @@ class Gr00tN1d7(PreTrainedModel):
             tune_top_llm_layers=config.tune_top_llm_layers,
             trainable_params_fp32=config.backbone_trainable_params_fp32,
             transformers_loading_kwargs=transformers_loading_kwargs,
+            motion_config=motion_config,
+            tune_motion=getattr(config, "tune_motion", True),
         )
 
         # Initialize action head
-        self.action_head = Gr00tN1d7ActionHead(config)
+        if getattr(config, "use_adaptive_component_head", False):
+            self.action_head = AdaptiveEmbodimentActionHead(config)
+            logger.info("Using AdaptiveEmbodimentActionHead (component-level MSAT decoder)")
+        else:
+            self.action_head = Gr00tN1d7ActionHead(config)
         from .processing_gr00t_n1d7 import Gr00tN1d7DataCollator
 
         self.collator = Gr00tN1d7DataCollator(
             model_name=config.model_name,
             model_type=config.backbone_model_type,
             transformers_loading_kwargs=transformers_loading_kwargs,
+            use_adaptive_component_head=getattr(config, "use_adaptive_component_head", False),
         )
 
     def prepare_input(self, inputs: dict) -> Tuple[BatchFeature, BatchFeature]:

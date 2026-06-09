@@ -16,7 +16,14 @@
 import logging
 
 import torch
+import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
+
+from gr00t.model.modules.qwen3_motion import (
+    MotionConfig,
+    install_motion_module,
+    set_motion_trainable,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +51,8 @@ class Qwen3Backbone(torch.nn.Module):
         tune_top_llm_layers: int = 0,
         trainable_params_fp32: bool = False,
         transformers_loading_kwargs: dict = {},
+        motion_config: MotionConfig | None = None,
+        tune_motion: bool = True,
     ):
         """
         Qwen3Backbone is to generate n_queries to represent the future action hidden states.
@@ -51,6 +60,8 @@ class Qwen3Backbone(torch.nn.Module):
             model_name: nvidia/Cosmos-Reason2-2B
             tune_llm: whether to tune the LLM model (default: False)
             tune_visual: whether to tune the visual model (default: False)
+            motion_config: optional STSS/MOSS motion module config
+            tune_motion: train motion_block while keeping the rest of vision frozen
         """
         if not _QWEN3VL_AVAILABLE:
             raise ImportError(
@@ -87,6 +98,12 @@ class Qwen3Backbone(torch.nn.Module):
         while len(self.model.language_model.layers) > select_layer:
             self.model.language_model.layers.pop(-1)
 
+        self.motion_config = motion_config
+        self.tune_motion = tune_motion
+        if motion_config is not None and motion_config.use_motion:
+            install_motion_module(self.model.visual, motion_config)
+            self._convert_motion_bn_to_float()
+
         self.select_layer = select_layer
         self.set_trainable_parameters(tune_llm, tune_visual, tune_top_llm_layers)
         if load_bf16 and trainable_params_fp32:
@@ -95,6 +112,14 @@ class Qwen3Backbone(torch.nn.Module):
                 if p.requires_grad:
                     p.data = p.data.to(torch.float32)
                     logger.debug(f"Casting trainable parameter {n} to fp32")
+
+    def _convert_motion_bn_to_float(self) -> None:
+        motion_block = getattr(self.model.visual, "motion_block", None)
+        if motion_block is None:
+            return
+        for module in motion_block.modules():
+            if isinstance(module, (nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)):
+                module.float()
 
     def set_trainable_parameters(self, tune_llm: bool, tune_visual: bool, tune_top_llm_layers: int):
         self.tune_llm = tune_llm
@@ -106,6 +131,12 @@ class Qwen3Backbone(torch.nn.Module):
         if not tune_visual:
             self.model.visual.requires_grad_(False)
 
+        if self.motion_config is not None and self.motion_config.use_motion:
+            set_motion_trainable(self.model.visual, tune_visual, self.tune_motion)
+            self.model.visual._gr00t_tune_motion_only = (
+                self.tune_motion and not self.tune_visual
+            )
+
         if tune_top_llm_layers > 0:
             for layer in self.model.language_model.layers[-tune_top_llm_layers:]:
                 for param in layer.parameters():
@@ -113,6 +144,8 @@ class Qwen3Backbone(torch.nn.Module):
 
         logger.debug(f"Tune backbone llm: {self.tune_llm}")
         logger.debug(f"Tune backbone visual: {self.tune_visual}")
+        if self.motion_config is not None and self.motion_config.use_motion:
+            logger.debug(f"Tune backbone motion: {self.tune_motion}")
         # Check if any parameters are still trainable. If not, log a warning.
         for name, p in self.named_parameters():
             if p.requires_grad:
@@ -131,15 +164,33 @@ class Qwen3Backbone(torch.nn.Module):
                 self.model.language_model.eval()
             if self.model.visual and not self.tune_visual:
                 self.model.visual.eval()
+                if (
+                    self.motion_config is not None
+                    and self.motion_config.use_motion
+                    and self.tune_motion
+                ):
+                    if hasattr(self.model.visual, "motion_block") and self.model.visual.motion_block:
+                        self.model.visual.motion_block.train()
 
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
 
+    def _set_motion_batch_meta(self, vl_input: dict) -> None:
+        num_frames = vl_input.get("num_frames")
+        num_views = vl_input.get("num_views")
+        if num_frames is None or num_views is None:
+            return
+        nf = int(num_frames[0]) if torch.is_tensor(num_frames) else int(num_frames)
+        nv = int(num_views[0]) if torch.is_tensor(num_views) else int(num_views)
+        self.model.visual._gr00t_num_frames = nf
+        self.model.visual._gr00t_num_views = nv
+
     def forward(self, vl_input: BatchFeature) -> BatchFeature:
         self.set_frozen_modules_to_eval_mode()
-        # 0. Set frozen module to eval
+        vl_dict = dict(vl_input)
+        self._set_motion_batch_meta(vl_dict)
         keys_to_use = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
-        vl_input = {k: vl_input[k] for k in keys_to_use}
+        vl_input = {k: vl_dict[k] for k in keys_to_use if k in vl_dict}
         outputs = self.model(**vl_input, output_hidden_states=True)
         outputs = outputs.hidden_states[-1]
         image_mask = vl_input["input_ids"] == self.model.config.image_token_id

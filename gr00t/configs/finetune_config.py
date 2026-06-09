@@ -32,11 +32,27 @@ class FinetuneConfig:
     base_model_path: str
     """Path to the pretrained base model checkpoint (e.g., Hugging Face model hub or local directory)."""
 
-    dataset_path: str
-    """Path to one dataset root, or an os.pathsep-separated list of dataset roots."""
-
     embodiment_tag: str
     """Embodiment tag (name or value, case-insensitive). See EmbodimentTag for known tags."""
+
+    dataset_path: str = ""
+    """Path to one dataset root, or an os.pathsep-separated list of dataset roots."""
+
+    robocasa365_root: str | None = None
+    """
+    If set, auto-discover LeRobot roots under RoboCasa365 layout
+    (pretrain|target / atomic|composite / TaskName / date / lerobot).
+    Takes precedence over ``dataset_path`` when non-empty.
+    """
+
+    robocasa365_split: str = "all"
+    """RoboCasa365 split filter: pretrain, target, or all."""
+
+    robocasa365_category: str = "all"
+    """RoboCasa365 category filter: atomic, composite, or all."""
+
+    robocasa365_tasks: str | None = None
+    """Optional comma-separated RoboCasa365 task names (e.g. CloseElectricKettleLid,WashLettuce)."""
 
     modality_config_path: str | None = None
     """
@@ -50,6 +66,21 @@ class FinetuneConfig:
 
     tune_visual: bool = False
     """If True, fine-tune the visual encoder (e.g., ViT or CNN backbone)."""
+
+    use_motion: bool = False
+    """If True, insert STSS/MOSS MotionModule after the specified vision encoder layer."""
+
+    motion_insert_layer: int = 9
+    """Vision encoder block index after which MOSS is applied (RLDX default: 9)."""
+
+    tune_motion: bool = True
+    """If True and use_motion, train motion_block while keeping the rest of vision frozen."""
+
+    gradient_checkpointing: bool | None = None
+    """Enable activation checkpointing. Default: auto-on when use_motion is True."""
+
+    use_adaptive_component_head: bool = False
+    """If True, use component-level AdaptiveEmbodimentActionHead instead of flat DiT head."""
 
     tune_projector: bool = True
     """If True, fine-tune the multimodal projector layers that map vision/language features to a shared space."""

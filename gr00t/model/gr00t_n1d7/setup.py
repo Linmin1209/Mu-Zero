@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from transformers import AutoModel, AutoProcessor
+from transformers import AutoConfig, AutoModel, AutoProcessor
 
 from gr00t.configs.base_config import Config
 from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
@@ -28,7 +28,27 @@ from gr00t.experiment.dist_utils import get_rank
 from gr00t.model.base.model_pipeline import ModelPipeline
 from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
 from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
+from gr00t.model.modules.qwen3_motion import is_motion_missing_key, motion_config_from_model_config
 from gr00t.model.registry import register_model
+
+
+def _is_adaptive_action_head_key(key: str) -> bool:
+    return key.startswith("action_head.") and (
+        ".msat" in key or "component_" in key or "msat_decode" in key
+    )
+
+
+def _is_legacy_action_head_key(key: str) -> bool:
+    if not key.startswith("action_head.") or _is_adaptive_action_head_key(key):
+        return False
+    shared_prefixes = (
+        "action_head.state_encoder",
+        "action_head.vlln",
+        "action_head.vl_self_attention",
+    )
+    if any(key.startswith(prefix) for prefix in shared_prefixes):
+        return False
+    return True
 
 
 # Convert tensors to lists for JSON serialization
@@ -79,16 +99,55 @@ class Gr00tN1d7Pipeline(ModelPipeline):
         """Setup model with proper vocabulary expansion."""
         skip_weight_loading = getattr(self.config.training, "skip_weight_loading", False)
         if self.config.training.start_from_checkpoint is not None and not skip_weight_loading:
+            checkpoint = self.config.training.start_from_checkpoint
+            model_cfg = AutoConfig.from_pretrained(
+                checkpoint,
+                trust_remote_code=self.config.training.transformers_trust_remote_code,
+                local_files_only=self.config.training.transformers_local_files_only,
+            )
+            # Checkpoint config.json stores hub id; override with local Cosmos path.
+            model_cfg.model_name = self.model_config.model_name
+            model_cfg.tune_llm = self.config.model.tune_llm
+            model_cfg.tune_visual = self.config.model.tune_visual
+            model_cfg.tune_projector = self.config.model.tune_projector
+            model_cfg.tune_diffusion_model = self.config.model.tune_diffusion_model
+            model_cfg.tune_vlln = self.config.model.tune_vlln
+            model_cfg.state_dropout_prob = self.config.model.state_dropout_prob
+            model_cfg.backbone_trainable_params_fp32 = (
+                self.config.model.backbone_trainable_params_fp32
+            )
+            model_cfg.load_bf16 = self.config.model.load_bf16
+            for motion_field in (
+                "use_motion",
+                "motion_insert_layer",
+                "motion_injection_point",
+                "motion_d_hid",
+                "motion_window",
+                "motion_ext_chnls",
+                "motion_int_chnls",
+                "motion_corr_func",
+                "motion_n_encoders",
+                "motion_use_layerscale",
+                "motion_layerscale_init",
+                "motion_use_layernorm",
+                "motion_use_syncbn",
+                "motion_gradient_check",
+                "motion_int_mode",
+                "tune_motion",
+            ):
+                if hasattr(self.config.model, motion_field):
+                    setattr(model_cfg, motion_field, getattr(self.config.model, motion_field))
+            for adaptive_field in (
+                "use_adaptive_component_head",
+                "component_projector_dims",
+                "component_loss_weights",
+                "component_msat_cfg",
+            ):
+                if hasattr(self.config.model, adaptive_field):
+                    setattr(model_cfg, adaptive_field, getattr(self.config.model, adaptive_field))
             model, loading_info = AutoModel.from_pretrained(
-                self.config.training.start_from_checkpoint,
-                tune_llm=self.config.model.tune_llm,
-                tune_visual=self.config.model.tune_visual,
-                tune_projector=self.config.model.tune_projector,
-                tune_diffusion_model=self.config.model.tune_diffusion_model,
-                tune_vlln=self.config.model.tune_vlln,
-                state_dropout_prob=self.config.model.state_dropout_prob,
-                backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
-                load_bf16=self.config.model.load_bf16,
+                checkpoint,
+                config=model_cfg,
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
                 output_loading_info=True,
                 **self.transformers_loading_kwargs,
@@ -96,16 +155,45 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
             missing_keys = loading_info.get("missing_keys", [])
             mask_token_missing = any("mask_token" in key for key in missing_keys)
-            if mask_token_missing and model.action_head.mask_token is not None:
-                with torch.no_grad():
-                    model.action_head.mask_token.data.copy_(
-                        0.02 * torch.randn_like(model.action_head.mask_token)
-                    )
-                logging.info("mask_token not in checkpoint - initialized")
+            if mask_token_missing and hasattr(model.action_head, "mask_token"):
+                if model.action_head.mask_token is not None:
+                    with torch.no_grad():
+                        model.action_head.mask_token.data.copy_(
+                            0.02 * torch.randn_like(model.action_head.mask_token)
+                        )
+                    logging.info("mask_token not in checkpoint - initialized")
 
             unexpected_keys = loading_info.get("unexpected_keys", [])
             mismatched_keys = loading_info.get("mismatched_keys", [])
-            other_missing = [k for k in missing_keys if "mask_token" not in k]
+            use_adaptive = getattr(model.config, "use_adaptive_component_head", False)
+            other_missing = [
+                k
+                for k in missing_keys
+                if "mask_token" not in k
+                and not is_motion_missing_key(k)
+                and not (use_adaptive and _is_adaptive_action_head_key(k))
+            ]
+            if use_adaptive:
+                unexpected_keys = [k for k in unexpected_keys if not _is_legacy_action_head_key(k)]
+            elif getattr(model.config, "use_adaptive_component_head", False) is False:
+                unexpected_keys = [
+                    k for k in unexpected_keys if not _is_adaptive_action_head_key(k)
+                ]
+            if getattr(model.config, "use_motion", False):
+                motion_block = getattr(model.backbone.model.visual, "motion_block", None)
+                if motion_block is None:
+                    from gr00t.model.modules.qwen3_motion import install_motion_module
+
+                    install_motion_module(
+                        model.backbone.model.visual,
+                        motion_config_from_model_config(model.config),
+                    )
+                    model.backbone._convert_motion_bn_to_float()
+                    model.backbone.model.visual._gr00t_tune_motion_only = (
+                        getattr(model.config, "tune_motion", True)
+                        and not getattr(model.config, "tune_visual", False)
+                    )
+                    logging.info("Installed MotionModule after checkpoint load (weights initialized)")
             errors = []
             if other_missing:
                 errors.append(f"Missing keys ({len(other_missing)}): {other_missing}")
@@ -172,6 +260,8 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
                 use_alternate_vl_dit=self.model_config.use_alternate_vl_dit,
                 use_relative_action=self.model_config.use_relative_action,
+                use_adaptive_component_head=self.model_config.use_adaptive_component_head,
+                component_projector_dims=self.model_config.component_projector_dims,
                 # State augmentation overrides
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,
@@ -200,6 +290,8 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 shortest_image_edge=self.model_config.shortest_image_edge,
                 crop_fraction=self.model_config.crop_fraction,
                 use_relative_action=self.model_config.use_relative_action,
+                use_adaptive_component_head=self.model_config.use_adaptive_component_head,
+                component_projector_dims=self.model_config.component_projector_dims,
                 # State augmentation
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,

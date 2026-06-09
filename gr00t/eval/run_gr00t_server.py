@@ -30,6 +30,12 @@ import tyro
 
 DEFAULT_MODEL_SERVER_PORT = 5555
 
+if os.environ.get("GROOT_IMPORT_ROBOCASA365_CONFIG", "1") != "0":
+    try:
+        import examples.RoboCasa365.robocasa365_config  # noqa: F401
+    except Exception as exc:
+        print(f"RoboCasa365 modality config import skipped: {exc!r}")
+
 
 @dataclass
 class ServerConfig:

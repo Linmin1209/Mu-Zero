@@ -37,6 +37,13 @@ from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.interfaces import BaseProcessor
 from gr00t.data.state_action.state_action_processor import StateActionProcessor
 from gr00t.data.utils import parse_modality_configs, to_json_serializable
+from gr00t.model.modules.component_action.component_schema import (
+    CANONICAL_COMPONENTS,
+    ComponentSchemaConfig,
+    DEFAULT_COMPONENT_DIMS,
+    build_active_mask,
+    merge_dataset_actions_to_components,
+)
 
 from .image_augmentations import (
     apply_with_replay,
@@ -93,6 +100,7 @@ class Gr00tN1d7DataCollator:
         model_name: str,
         model_type: str = "qwen",
         transformers_loading_kwargs: dict = {},
+        use_adaptive_component_head: bool = False,
     ):
         ### We need to use the same processor for padding input ids and concat
         self.processor = build_processor(model_name, transformers_loading_kwargs)
@@ -100,6 +108,7 @@ class Gr00tN1d7DataCollator:
         self.processor.tokenizer.padding_side = "left"
         self.model_type = model_type
         self.model_name = model_name
+        self.use_adaptive_component_head = use_adaptive_component_head
 
     def __call__(self, features: list[Dict[str, Any]]) -> BatchFeature:
         batch = {}
@@ -133,6 +142,25 @@ class Gr00tN1d7DataCollator:
                 "input_ids",
             ):
                 raise Exception("Not implemented")
+            elif key in ("num_frames", "num_views"):
+                batch[key] = torch.tensor(values, dtype=torch.int64)
+            elif key == "component_actions":
+                merged: dict[str, torch.Tensor] = {}
+                comp_names = sorted({c for sample in values for c in sample.keys()})
+                for comp in comp_names:
+                    comp_arrays = [sample[comp] for sample in values if comp in sample]
+                    if len(comp_arrays) != len(values):
+                        raise ValueError(
+                            f"Batch has inconsistent active component {comp!r}; "
+                            "mixed component layouts are not supported yet."
+                        )
+                    if torch.is_tensor(comp_arrays[0]):
+                        merged[comp] = torch.stack(comp_arrays)
+                    else:
+                        merged[comp] = torch.from_numpy(np.stack(comp_arrays))
+                batch[key] = merged
+            elif key == "active_component_mask":
+                batch[key] = torch.from_numpy(np.stack(values))
             else:
                 # state, state_mask, action and action_mask - stack to form batch dimension
                 batch[key] = torch.from_numpy(np.stack(values))
@@ -174,6 +202,9 @@ class Gr00tN1d7Processor(BaseProcessor):
         state_dropout_prob: float = 0.0,
         # Normalization
         use_mean_std: bool = False,
+        # Adaptive component action head
+        use_adaptive_component_head: bool = False,
+        component_projector_dims: dict[str, int] | None = None,
         # Backward-compat params (stored but not actively used)
         letter_box_transform: bool = False,
     ):
@@ -211,6 +242,8 @@ class Gr00tN1d7Processor(BaseProcessor):
         self.max_state_dim = max_state_dim
         self.max_action_dim = max_action_dim
         self.max_action_horizon = max_action_horizon
+        self.use_adaptive_component_head = use_adaptive_component_head
+        self.component_projector_dims = component_projector_dims
 
         # Save image processing settings
         self.image_crop_size = image_crop_size
@@ -315,6 +348,8 @@ class Gr00tN1d7Processor(BaseProcessor):
         state: dict[str, np.ndarray] | None = None,
     ):
         """Undo action normalization and convert relative actions to absolute."""
+        if isinstance(action, dict):
+            return self.decode_component_actions(action, embodiment_tag, state)
         # Split concatenated action into joint groups
         out_dict = {}
         start_idx = 0
@@ -330,6 +365,45 @@ class Gr00tN1d7Processor(BaseProcessor):
         # Use StateActionProcessor to unnormalize and convert to absolute
         return self.state_action_processor.unapply_action(
             out_dict, embodiment_tag.value, state=state
+        )
+
+    def decode_component_actions(
+        self,
+        component_actions: dict[str, np.ndarray],
+        embodiment_tag: EmbodimentTag,
+        state: dict[str, np.ndarray] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Decode canonical component predictions back to dataset action keys."""
+        schema = ComponentSchemaConfig(
+            component_dims=dict(self.component_projector_dims or DEFAULT_COMPONENT_DIMS)
+        )
+        groups = schema.groups_for_embodiment(embodiment_tag.value)
+        out_dict: dict[str, np.ndarray] = {}
+        for comp, tensor in component_actions.items():
+            keys = groups.get(comp)
+            if not keys:
+                continue
+            if len(keys) == 1:
+                out_dict[keys[0]] = tensor
+                continue
+            start = 0
+            for key in keys:
+                if key not in self.state_action_processor.norm_params[embodiment_tag.value][
+                    "action"
+                ]:
+                    continue
+                dim = int(
+                    self.state_action_processor.norm_params[embodiment_tag.value]["action"][key][
+                        "dim"
+                    ].item()
+                )
+                out_dict[key] = tensor[..., start : start + dim]
+                start += dim
+        stripped_state = None
+        if state is not None:
+            stripped_state = {k.replace("state.", ""): v for k, v in state.items()}
+        return self.state_action_processor.unapply_action(
+            out_dict, embodiment_tag.value, state=stripped_state
         )
 
     def unapply(
@@ -469,6 +543,8 @@ class Gr00tN1d7Processor(BaseProcessor):
         if action_horizon > 0:
             action_mask[:, :action_horizon] = 1.0
         transformed_observation["action_mask"] = action_mask
+        transformed_observation["num_frames"] = torch.full((B,), T, dtype=torch.int64)
+        transformed_observation["num_views"] = torch.full((B,), V, dtype=torch.int64)
 
         return BatchFeature(transformed_observation)
 
@@ -524,50 +600,89 @@ class Gr00tN1d7Processor(BaseProcessor):
             embodiment_tag=embodiment_tag.value,
         )
 
+        component_tensors = None
+        active_mask = None
+        action_mask = None
+
         if normalized_actions:
-            # Concatenate actions
-            action_keys = self.modality_configs[embodiment_tag.value]["action"].modality_keys
-            normalized_actions = torch.cat(
-                [torch.from_numpy(normalized_actions[key]) for key in action_keys],
-                dim=-1,
-            )  # (t, d)
-            action_dim = normalized_actions.shape[1]
-            # Pad action to max_action_dim
-            normalized_actions = torch.cat(
-                [
-                    normalized_actions,
-                    torch.zeros(
-                        normalized_actions.shape[0],
-                        self.max_action_dim - normalized_actions.shape[1],
-                    ),
-                ],
-                dim=-1,
-            )  # (t, max_action_dim)
-            # Pad action to max_action_horizon
-            action_horizon = normalized_actions.shape[0]
-            assert action_horizon <= self.max_action_horizon, (
-                f"Action sequence length {action_horizon} exceeds max_action_horizon"
-                f" {self.max_action_horizon}. Increase model config action_horizon to"
-                f" >= {action_horizon}."
-            )
-            normalized_actions = torch.cat(
-                [
-                    normalized_actions,
-                    torch.zeros(
-                        self.max_action_horizon - normalized_actions.shape[0],
-                        self.max_action_dim,
-                    ),
-                ],
-                dim=0,
-            )  # (max_action_horizon, max_action_dim)
-            # Create action mask
-            action_mask = torch.ones_like(normalized_actions)
-            action_mask[action_horizon:] = 0
-            action_mask[:, action_dim:] = 0
+            if self.use_adaptive_component_head:
+                per_key = {
+                    key: normalized_actions[key]
+                    for key in self.modality_configs[embodiment_tag.value]["action"].modality_keys
+                    if key in normalized_actions
+                }
+                component_dims = dict(DEFAULT_COMPONENT_DIMS)
+                if self.component_projector_dims:
+                    component_dims = dict(self.component_projector_dims)
+                schema = ComponentSchemaConfig(component_dims=component_dims)
+                components, active = merge_dataset_actions_to_components(
+                    per_key, embodiment_tag.value, schema
+                )
+                action_horizon = next(iter(components.values())).shape[0]
+                assert action_horizon <= self.max_action_horizon, (
+                    f"Action sequence length {action_horizon} exceeds max_action_horizon"
+                    f" {self.max_action_horizon}."
+                )
+                component_tensors = {
+                    comp: torch.from_numpy(arr[: self.max_action_horizon]).to(torch.float32)
+                    for comp, arr in components.items()
+                }
+                active_mask = build_active_mask(active)
+            else:
+                # Concatenate actions
+                action_keys = self.modality_configs[embodiment_tag.value]["action"].modality_keys
+                normalized_actions = torch.cat(
+                    [torch.from_numpy(normalized_actions[key]) for key in action_keys],
+                    dim=-1,
+                )  # (t, d)
+                action_dim = normalized_actions.shape[1]
+                # Pad action to max_action_dim
+                normalized_actions = torch.cat(
+                    [
+                        normalized_actions,
+                        torch.zeros(
+                            normalized_actions.shape[0],
+                            self.max_action_dim - normalized_actions.shape[1],
+                        ),
+                    ],
+                    dim=-1,
+                )  # (t, max_action_dim)
+                # Pad action to max_action_horizon
+                action_horizon = normalized_actions.shape[0]
+                assert action_horizon <= self.max_action_horizon, (
+                    f"Action sequence length {action_horizon} exceeds max_action_horizon"
+                    f" {self.max_action_horizon}. Increase model config action_horizon to"
+                    f" >= {action_horizon}."
+                )
+                normalized_actions = torch.cat(
+                    [
+                        normalized_actions,
+                        torch.zeros(
+                            self.max_action_horizon - normalized_actions.shape[0],
+                            self.max_action_dim,
+                        ),
+                    ],
+                    dim=0,
+                )  # (max_action_horizon, max_action_dim)
+                # Create action mask
+                action_mask = torch.ones_like(normalized_actions)
+                action_mask[action_horizon:] = 0
+                action_mask[:, action_dim:] = 0
         else:
             assert not self.training, "Action is required in training mode"
             normalized_actions = None
             action_mask = None
+            if self.use_adaptive_component_head:
+                component_dims = dict(DEFAULT_COMPONENT_DIMS)
+                if self.component_projector_dims:
+                    component_dims = dict(self.component_projector_dims)
+                schema = ComponentSchemaConfig(component_dims=component_dims)
+                groups = schema.groups_for_embodiment(embodiment_tag.value)
+                active = [comp for comp in CANONICAL_COMPONENTS if comp in groups]
+                active_mask = build_active_mask(active)
+            else:
+                component_tensors = None
+                active_mask = None
 
         # Concatenate states with optional dropout/noise augmentation
         state_keys = self.modality_configs[embodiment_tag.value]["state"].modality_keys
@@ -621,12 +736,19 @@ class Gr00tN1d7Processor(BaseProcessor):
         transformed_inputs = {
             "state": normalized_states.to(torch.get_default_dtype()),
         }
-        if normalized_actions is not None:
+        if self.use_adaptive_component_head:
+            if component_tensors is not None:
+                transformed_inputs["component_actions"] = {
+                    k: v.to(torch.get_default_dtype()) for k, v in component_tensors.items()
+                }
+            if active_mask is not None:
+                transformed_inputs["active_component_mask"] = active_mask
+        elif normalized_actions is not None:
             transformed_inputs["action"] = normalized_actions.to(torch.get_default_dtype())
+            if action_mask is not None:
+                transformed_inputs["action_mask"] = action_mask
         # Add VLM inputs
         transformed_inputs.update(vlm_inputs)
-        if action_mask is not None:
-            transformed_inputs["action_mask"] = action_mask
         transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]
         return transformed_inputs
 
@@ -681,6 +803,8 @@ class Gr00tN1d7Processor(BaseProcessor):
         )  # (T*V, C, H, W), processor expects numpy array
 
         vlm_inputs = self._apply_vlm_processing(stacked_images, language)
+        vlm_inputs["num_frames"] = temporal_stacked_images[image_keys[0]].shape[0]
+        vlm_inputs["num_views"] = len(image_keys)
         return vlm_inputs
 
     def save_pretrained(self, save_directory: str | Path) -> list[Path]:

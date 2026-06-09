@@ -20,6 +20,8 @@ This module provides the core policy classes for running Gr00t models:
 - Gr00tSimPolicyWrapper: Wrapper for compatibility with existing Gr00t simulation environments
 """
 
+import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,22 @@ from gr00t.data.interfaces import BaseProcessor
 from gr00t.data.types import MessageType, ModalityConfig, VLAStepData
 
 from .policy import BasePolicy, PolicyWrapper
+
+
+def _to_numpy_norm_params(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        out = {}
+        for key, val in obj.items():
+            if key in ["min", "max", "mean", "std", "q01", "q99"]:
+                out[key] = np.array(val, dtype=np.float32)
+            elif key == "dim":
+                out[key] = np.array(val, dtype=np.int64)
+            else:
+                out[key] = _to_numpy_norm_params(val)
+        return out
+    if isinstance(obj, list):
+        return np.array(obj, dtype=np.float32)
+    return obj
 
 
 def _rec_to_dtype(x: Any, dtype: torch.dtype) -> Any:
@@ -114,6 +132,12 @@ class Gr00tPolicy(BasePolicy):
         )
         self.processor: BaseProcessor = AutoProcessor.from_pretrained(processor_dir)
         self.processor.eval()
+        norm_override = os.environ.get("GROOT_ROBOCASA_NORM_PATH")
+        if norm_override:
+            with open(norm_override, "r", encoding="utf-8") as f:
+                norm_params = _to_numpy_norm_params(json.load(f))
+            self.processor.state_action_processor.norm_params.update(norm_params)
+            print(f"Loaded norm override: {norm_override}")
 
         # Store embodiment-specific configurations
         self.embodiment_tag = embodiment_tag
@@ -406,14 +430,20 @@ class Gr00tPolicy(BasePolicy):
         # Step 4: Run model inference to predict actions
         with torch.inference_mode():
             model_pred = self.model.get_action(**collated_inputs)
-        normalized_action = model_pred["action_pred"].float()
+        if "component_action_pred" in model_pred:
+            component_pred = model_pred["component_action_pred"]
+            normalized_action = {
+                comp: tensor.float().cpu().numpy() for comp, tensor in component_pred.items()
+            }
+        else:
+            normalized_action = model_pred["action_pred"].float().cpu().numpy()
 
         # Step 5: Decode actions from normalized space back to physical units
         batched_states = {}
         for k in self.modality_configs["state"].modality_keys:
             batched_states[k] = np.stack([s[k] for s in states], axis=0)  # (B, T, D)
         unnormalized_action = self.processor.decode_action(
-            normalized_action.cpu().numpy(), self.embodiment_tag, batched_states
+            normalized_action, self.embodiment_tag, batched_states
         )
 
         # Cast all actions to float32 for consistency
@@ -514,6 +544,19 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
             "Only one language delta index is supported"
         )
 
+    def _add_robocasa365_aliases(self, observation: dict[str, Any]) -> dict[str, Any]:
+        observation = dict(observation)
+        aliases = {
+            "video.res256_image_side_0": "video.robot0_agentview_left",
+            "video.res256_image_side_1": "video.robot0_agentview_right",
+            "video.res256_image_wrist_0": "video.robot0_eye_in_hand",
+            "annotation.human.action.task_description": "annotation.human.task_description",
+        }
+        for dst, src in aliases.items():
+            if dst not in observation and src in observation:
+                observation[dst] = observation[src]
+        return observation
+
     def check_observation(self, observation: dict[str, Any]) -> None:
         """Validate observation from Gr00t sim environment format.
 
@@ -532,6 +575,7 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
         Raises:
             AssertionError: If any validation check fails
         """
+        observation = self._add_robocasa365_aliases(observation)
         modality_configs = self.get_modality_config()
 
         # ===== VIDEO VALIDATION =====
@@ -647,6 +691,7 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
         Returns:
             Tuple of (flat_actions_dict, info_dict)
         """
+        observation = self._add_robocasa365_aliases(observation)
         # Transform flat observation format to nested format expected by Gr00tPolicy
         new_obs = {}
         for modality in ["video", "state", "language"]:

@@ -17,6 +17,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
+import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -126,6 +128,25 @@ def get_libero_env_fn(
     return env_fn
 
 
+def get_robocasa365_env_fn(
+    env_name: str,
+    seed: int = 0,
+    robocasa_split: str = "pretrain",
+):
+    """RoboCasa365 sim (``robocasa/<Task>``) with pretrain/target split."""
+
+    def env_fn():
+        import os
+
+        import robocasa  # noqa: F401  # registers robocasa/* via robocasa365 gym_wrapper
+
+        os.environ.setdefault("MUJOCO_GL", "egl")
+        os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+        return gym.make(env_name, split=robocasa_split, seed=seed)
+
+    return env_fn
+
+
 def get_robocasa_env_fn(
     env_name: str,
 ):
@@ -138,13 +159,23 @@ def get_robocasa_env_fn(
     return env_fn
 
 
-def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
+def get_gym_env(
+    env_name: str,
+    env_idx: int,
+    total_n_envs: int,
+    seed: int = 0,
+    robocasa_split: str = "pretrain",
+):
     """Create Ray environment factory function without wrappers."""
 
     env_embodiment = get_embodiment_tag_from_env_name(env_name)
     env_prefix = env_name.split("/")[0]
 
-    if env_prefix in ("robocasa_panda_omron", "gr1_unified"):
+    if env_prefix == "robocasa":
+        env_fn = get_robocasa365_env_fn(
+            env_name, seed=seed + env_idx, robocasa_split=robocasa_split
+        )
+    elif env_prefix in ("robocasa_panda_omron", "gr1_unified"):
         env_fn = get_robocasa_env_fn(env_name)
 
     elif env_embodiment in (EmbodimentTag.SIMPLER_ENV_GOOGLE, EmbodimentTag.SIMPLER_ENV_WIDOWX):
@@ -160,7 +191,9 @@ def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
 
 
 def create_eval_env(
-    env_name: str, env_idx: int, total_n_envs: int, wrapper_configs: WrapperConfigs
+    env_name: str, env_idx: int, total_n_envs: int, wrapper_configs: WrapperConfigs,
+    seed: int = 0,
+    robocasa_split: str = "pretrain",
 ) -> gym.Env:
     """Create a single evaluation environment with wrappers.
 
@@ -172,7 +205,9 @@ def create_eval_env(
         Wrapped gymnasium environment
     """
 
-    env = get_gym_env(env_name, env_idx, total_n_envs)
+    env = get_gym_env(
+        env_name, env_idx, total_n_envs, seed=seed, robocasa_split=robocasa_split
+    )
     if wrapper_configs.video.video_dir is not None:
         from gr00t.eval.sim.wrapper.video_recording_wrapper import (
             VideoRecorder,
@@ -242,6 +277,7 @@ def run_rollout_gymnasium_policy(
     n_episodes: int = 10,
     n_envs: int = 1,
     seed: int | None = None,
+    robocasa_split: str = "pretrain",
 ) -> Any:
     """Run policy rollouts in parallel environments.
 
@@ -269,6 +305,8 @@ def run_rollout_gymnasium_policy(
             env_name=env_name,
             total_n_envs=n_envs,
             wrapper_configs=wrapper_configs,
+            seed=int(seed) if seed is not None else 0,
+            robocasa_split=robocasa_split,
         )
         for idx in range(n_envs)
     ]
@@ -419,6 +457,26 @@ def run_rollout_gymnasium_policy(
     return env_name, episode_successes, episode_infos
 
 
+def _video_delta_indices_from_checkpoint(
+    model_path: str, embodiment_tag: EmbodimentTag
+) -> np.ndarray | None:
+    if not model_path:
+        return None
+    proc_path = Path(model_path) / "processor_config.json"
+    if not proc_path.is_file():
+        return None
+    with open(proc_path) as f:
+        data = json.load(f)
+    modality_configs = data.get("processor_kwargs", {}).get("modality_configs", {})
+    tag = embodiment_tag.value
+    if tag not in modality_configs:
+        return None
+    deltas = modality_configs[tag].get("video", {}).get("delta_indices")
+    if deltas is None:
+        return None
+    return np.array(deltas, dtype=np.int64)
+
+
 def create_gr00t_sim_policy(
     model_path: str,
     embodiment_tag: EmbodimentTag,
@@ -432,7 +490,12 @@ def create_gr00t_sim_policy(
     if policy_client_host and policy_client_port:
         from gr00t.policy.server_client import PolicyClient
 
-        policy = PolicyClient(host=policy_client_host, port=policy_client_port)
+        timeout_ms = int(os.environ.get("GR00T_POLICY_CLIENT_TIMEOUT_MS", "120000"))
+        policy = PolicyClient(
+            host=policy_client_host,
+            port=policy_client_port,
+            timeout_ms=timeout_ms,
+        )
     else:
         gr00t_policy = Gr00tPolicy(
             embodiment_tag=embodiment_tag,
@@ -463,6 +526,7 @@ def run_gr00t_sim_policy(
     trt_engine_path: str = "",
     trt_mode: TrtMode = TrtMode.N17_FULL_PIPELINE,
     seed: int | None = None,
+    robocasa_split: str = "pretrain",
 ):
     # seed_everything resolves `None` via the GR00T_EVAL_SEED env var and is a
     # no-op when that is also unset, so the historical non-deterministic
@@ -479,6 +543,18 @@ def run_gr00t_sim_policy(
             video_dir = f"/tmp/sim_eval_videos_{model_slug}_ac{n_action_steps}_{uuid.uuid4()}"
         else:
             video_dir = f"/tmp/sim_eval_videos_{env_name}_ac{n_action_steps}_{uuid.uuid4()}"
+
+    video_delta_indices = np.array([0])
+    checkpoint_path = Path(model_path).resolve() if model_path else None
+    loaded_deltas = (
+        _video_delta_indices_from_checkpoint(str(checkpoint_path), embodiment_tag)
+        if checkpoint_path is not None
+        else None
+    )
+    if loaded_deltas is not None:
+        video_delta_indices = loaded_deltas
+        print(f"[i] video_delta_indices from checkpoint: {video_delta_indices.tolist()}")
+
     wrapper_configs = WrapperConfigs(
         video=VideoConfig(
             video_dir=video_dir,
@@ -488,6 +564,7 @@ def run_gr00t_sim_policy(
             n_action_steps=n_action_steps,
             max_episode_steps=max_episode_steps,
             terminate_on_success=True,
+            video_delta_indices=video_delta_indices,
         ),
     )
 
@@ -507,6 +584,7 @@ def run_gr00t_sim_policy(
         n_episodes=n_episodes,
         n_envs=n_envs,
         seed=seed,
+        robocasa_split=robocasa_split,
     )
     print("Video saved to: ", wrapper_configs.video.video_dir)
     return results
@@ -556,18 +634,21 @@ class RolloutConfig:
     ``GR00T_EVAL_SEED`` env var; if that is also unset, keeps the historical
     non-deterministic behavior."""
 
+    robocasa_split: str = "pretrain"
+    """RoboCasa365 split passed to ``gym.make(..., split=...)`` for ``robocasa/*`` envs."""
+
 
 if __name__ == "__main__":
     args = tyro.cli(RolloutConfig)
 
     # validate policy configuration
-    assert (args.model_path and not (args.policy_client_host or args.policy_client_port)) or (
-        not args.model_path and args.policy_client_host and args.policy_client_port is not None
-    ), (
-        "Invalid policy configuration: You must provide EITHER model_path OR (policy_client_host & policy_client_port), not both.\n"
-        "If all 3 arguments are provided, explicitly choose one:\n"
-        '  - To use policy client: set --policy-client-host and --policy-client-port, and set --model-path ""\n'
-        '  - To use model path: set --model-path, and set --policy-client-host "" (and leave --policy-client-port unset)'
+    uses_policy_client = bool(args.policy_client_host and args.policy_client_port is not None)
+    uses_local_policy = bool(args.model_path) and not uses_policy_client
+    assert uses_local_policy or uses_policy_client, (
+        "Invalid policy configuration: provide --model-path for local inference, or "
+        "--policy-client-host and --policy-client-port for a remote server. "
+        "When using a policy client, you may also pass --model-path so rollout can "
+        "read checkpoint modality config (e.g. multi-frame video delta_indices)."
     )
 
     results = run_gr00t_sim_policy(
@@ -583,6 +664,7 @@ if __name__ == "__main__":
         trt_engine_path=args.trt_engine_path,
         trt_mode=args.trt_mode,
         seed=args.seed,
+        robocasa_split=args.robocasa_split,
     )
     print("results: ", results)
     print("success rate: ", np.mean(results[1]))

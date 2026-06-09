@@ -44,6 +44,23 @@ class Gr00tN1d7Config(PretrainedConfig):
     backbone_embedding_dim: int = 2048  # project_to_dim; must match Cosmos-Reason2-2B hidden size
     tune_llm: bool = False
     tune_visual: bool = False
+    # STSS/MOSS motion module (ported from RLDX-1; requires multi-frame video input)
+    use_motion: bool = False
+    motion_insert_layer: int = 9
+    motion_injection_point: str = "vision_encoder"
+    motion_d_hid: int = 512
+    motion_window: tuple[int, int, int] = (5, 9, 9)
+    motion_ext_chnls: tuple[int, ...] = (256,)
+    motion_int_chnls: tuple[int, ...] = (256, 256, 512)
+    motion_corr_func: str = "cosine"
+    motion_n_encoders: int = 1
+    motion_use_layerscale: bool = False
+    motion_layerscale_init: float = 1e-5
+    motion_use_layernorm: bool = False
+    motion_use_syncbn: bool = False
+    motion_gradient_check: bool = False
+    motion_int_mode: str = "lite"
+    tune_motion: bool = True
     select_layer: int = 12
     reproject_vision: bool = False
     use_flash_attention: bool = True
@@ -120,6 +137,12 @@ class Gr00tN1d7Config(PretrainedConfig):
 
     # Multi-embodiment parameters
     max_num_embodiments: int = 32
+
+    # Adaptive component-level action head (zero-padding-free MSAT decoder)
+    use_adaptive_component_head: bool = False
+    component_projector_dims: dict[str, int] | None = None
+    component_loss_weights: dict[str, float] | None = None
+    component_msat_cfg: dict | None = None
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

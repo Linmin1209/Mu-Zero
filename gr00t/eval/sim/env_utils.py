@@ -29,8 +29,14 @@ ENV_PREFIX_TO_EMBODIMENT_TAG: dict[str, EmbodimentTag] = {
     "simpler_env_widowx": EmbodimentTag.SIMPLER_ENV_WIDOWX,
     "libero_sim": EmbodimentTag.LIBERO_PANDA,
     "robocasa_panda_omron": EmbodimentTag.ROBOCASA_PANDA_OMRON,
+    "robocasa": EmbodimentTag.ROBOCASA_PANDA_OMRON,
     "gr1_unified": EmbodimentTag.ROBOCASA_GR1_TABLETOP,
 }
+
+
+def is_robocasa365_env(env_name: str) -> bool:
+    """True for RoboCasa365 gym ids ``robocasa/<TaskName>``."""
+    return env_name.startswith("robocasa/")
 
 
 def get_embodiment_tag_from_env_name(env_name: str) -> EmbodimentTag:
