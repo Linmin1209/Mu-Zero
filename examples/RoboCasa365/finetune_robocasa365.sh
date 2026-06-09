@@ -4,21 +4,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=examples/RoboCasa365/env_defaults.sh
+source "$SCRIPT_DIR/env_defaults.sh"
 
 # Defaults (override via env or CLI args below)
-export ROBOCASA365_ROOT="${ROBOCASA365_ROOT:-/HOME/sysu_xdliang/sysu_xdliang_1/HDD_POOL/linmin/datasets/robocasa365-datasets}"
-export GR00T_MODELS_ROOT="${GR00T_MODELS_ROOT:-/HOME/sysu_xdliang/sysu_xdliang_1/HDD_POOL/linmin/models}"
-export GR00T_BASE_MODEL="${GR00T_BASE_MODEL:-$GR00T_MODELS_ROOT/GR00T-N1.7-3B}"
-export GR00T_COSMOS_MODEL_PATH="${GR00T_COSMOS_MODEL_PATH:-$GR00T_MODELS_ROOT/Cosmos-Reason2-2B}"
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-export GROOT_PATCH_MISTRAL=1
-export GROOT_HF_LOCAL_FIRST=1
-
 ROBOCASA365_SPLIT="${ROBOCASA365_SPLIT:-pretrain}"
 ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-atomic}"
 ROBOCASA365_TASKS="${ROBOCASA365_TASKS:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-/tmp/gr00t_robocasa365_finetune}"
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/gr00t_robocasa365_finetune}"
 NUM_GPUS="${NUM_GPUS:-1}"
 MAX_STEPS="${MAX_STEPS:-30000}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"

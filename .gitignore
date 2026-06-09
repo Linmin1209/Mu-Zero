@@ -180,6 +180,4 @@ sysid_data/
 isaac_data/
 offline_open_loop_eval_plots/
 
-# Generic model/data folders
-/models
-/data
+examples/RoboCasa365/local_paths.sh

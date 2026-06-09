@@ -6,17 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-
-export ROBOCASA365_ROOT="${ROBOCASA365_ROOT:-/HOME/sysu_xdliang/sysu_xdliang_1/HDD_POOL/linmin/datasets/robocasa365-datasets}"
-export GR00T_MODELS_ROOT="${GR00T_MODELS_ROOT:-/HOME/sysu_xdliang/sysu_xdliang_1/HDD_POOL/linmin/models}"
-export GR00T_BASE_MODEL="${GR00T_BASE_MODEL:-$GR00T_MODELS_ROOT/GR00T-N1.7-3B}"
-export GR00T_COSMOS_MODEL_PATH="${GR00T_COSMOS_MODEL_PATH:-$GR00T_MODELS_ROOT/Cosmos-Reason2-2B}"
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-export GROOT_PATCH_MISTRAL=1
-export GROOT_HF_LOCAL_FIRST=1
-export NO_ALBUMENTATIONS_UPDATE=1
-export PYTHONUNBUFFERED=1
+# shellcheck source=examples/RoboCasa365/env_defaults.sh
+source "$SCRIPT_DIR/env_defaults.sh"
 
 ROBOCASA365_SPLIT="${ROBOCASA365_SPLIT:-pretrain}"
 ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-atomic}"
@@ -41,6 +32,8 @@ cd "$PROJECT_ROOT"
 mkdir -p "$OUTPUT_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+echo "[i] dataset: $ROBOCASA365_ROOT"
+echo "[i] base model: $GR00T_BASE_MODEL"
 echo "[i] Task: $ROBOCASA365_TASKS"
 echo "[i] Split/category: $ROBOCASA365_SPLIT / $ROBOCASA365_CATEGORY"
 echo "[i] modality config: $MODALITY_CONFIG (video delta [-6,-4,-2,0])"
