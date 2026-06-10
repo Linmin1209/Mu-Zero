@@ -23,7 +23,7 @@ bash "$SCRIPT_DIR/eval_robocasa365.sh" \
   --model-path "$CKPT" \
   --task-set "${TASK_SET:-atomic_seen}" \
   --split "${SPLIT:-pretrain}" \
-  --n-episodes "${N_EPISODES:-10}" \
+  --n-episodes "${N_EPISODES:-50}" \
   --n-envs "${N_ENVS:-1}" \
   --python "$PY365" \
   "$@"

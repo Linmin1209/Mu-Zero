@@ -90,3 +90,11 @@ ROBOCASA365_COMPONENT_PROJECTOR_DIMS = {
     "right_hand": 1,
     "base": 4,
 }
+
+ROBOCASA365_ACTION_KEY_DIMS = {
+    "gripper_close": 1,
+    "end_effector_position": 3,
+    "end_effector_rotation": 3,
+    "base_motion": 4,
+    "control_mode": 1,
+}

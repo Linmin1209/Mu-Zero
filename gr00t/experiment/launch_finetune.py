@@ -144,6 +144,11 @@ if __name__ == "__main__":
     config.model.motion_insert_layer = ft_config.motion_insert_layer
     config.model.tune_motion = ft_config.tune_motion
     config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
+    config.model.use_component_factored_head = ft_config.use_component_factored_head
+    if ft_config.use_adaptive_component_head and ft_config.use_component_factored_head:
+        raise ValueError(
+            "Choose at most one of --use-adaptive-component-head and --use-component-factored-head."
+        )
     if ft_config.use_adaptive_component_head:
         component_dims = None
         if ft_config.modality_config_path:
@@ -161,6 +166,35 @@ if __name__ == "__main__":
                 component_dims = None
         config.model.component_projector_dims = component_dims
         print("[i] AdaptiveEmbodimentActionHead enabled (component-level MSAT decoder)")
+    if ft_config.use_component_factored_head:
+        action_key_dims = None
+        action_key_order = None
+        component_dims = None
+        if ft_config.modality_config_path:
+            try:
+                import importlib.util
+
+                spec = importlib.util.spec_from_file_location(
+                    "mod_cfg", ft_config.modality_config_path
+                )
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    action_key_dims = getattr(mod, "ROBOCASA365_ACTION_KEY_DIMS", None)
+                    component_dims = getattr(mod, "ROBOCASA365_COMPONENT_PROJECTOR_DIMS", None)
+                    cfg = getattr(mod, "robocasa365_panda_omron_config", None)
+                    if cfg is not None:
+                        action_key_order = list(cfg["action"].modality_keys)
+            except Exception:
+                pass
+        config.model.component_action_key_dims = action_key_dims
+        config.model.component_action_key_order = action_key_order
+        config.model.component_projector_dims = component_dims
+        config.model.component_layout_embodiment_tag = embodiment_tag
+        print(
+            "[i] ComponentFactoredActionHead enabled "
+            "(native AlternateVLDiT + per-component CategorySpecificMLP decoders)"
+        )
     if ft_config.use_motion:
         print(
             f"[i] STSS/MOSS enabled at vision layer {ft_config.motion_insert_layer}; "

@@ -415,6 +415,7 @@ def run_rollout_gymnasium_policy(
                 # static type silently flips int <-> float across iterations.
                 current_rewards[env_idx] = 0.0
                 current_lengths[env_idx] = 0
+                policy.reset()
         observations = next_obs
     pbar.close()
 

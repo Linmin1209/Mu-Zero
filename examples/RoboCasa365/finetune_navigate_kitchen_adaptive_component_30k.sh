@@ -19,7 +19,9 @@ LOG_FILE="${LOG_FILE:-$OUTPUT_DIR/train.log}"
 NUM_GPUS="${NUM_GPUS:-2}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 MAX_STEPS=30000
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
+# Per-GPU micro batch = global_batch_size / num_gpus. Adaptive MSAT OOMs at 16/GPU on 80GB.
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-16}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 SAVE_STEPS="${SAVE_STEPS:-5000}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-10}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-8}"
@@ -40,7 +42,7 @@ echo "[i] Split/category: $ROBOCASA365_SPLIT / $ROBOCASA365_CATEGORY"
 echo "[i] modality config: $MODALITY_CONFIG (video delta [-6,-4,-2,0])"
 echo "[i] use_adaptive_component_head=True (right_arm/right_hand/base component tokens)"
 echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION"
-echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS cuda=$CUDA_VISIBLE_DEVICES"
+echo "[i] max_steps=$MAX_STEPS micro_batch=$GLOBAL_BATCH_SIZE grad_accum=$GRADIENT_ACCUMULATION_STEPS effective_batch=$((GLOBAL_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS)) num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
 echo "[i] gradient_checkpointing=$GRADIENT_CHECKPOINTING"
 echo "[i] output: $OUTPUT_DIR"
 echo "[i] log: $LOG_FILE"
@@ -58,7 +60,9 @@ if [[ "$USE_MOTION" == "1" ]]; then
 fi
 GC_ARGS=()
 if [[ "$GRADIENT_CHECKPOINTING" == "1" ]]; then
-  GC_ARGS+=(--gradient-checkpointing)
+  GC_ARGS+=(--gradient-checkpointing True)
+else
+  GC_ARGS+=(--gradient-checkpointing False)
 fi
 
 run_train() {
@@ -75,6 +79,7 @@ run_train() {
       --output-dir "$OUTPUT_DIR" \
       --max-steps "$MAX_STEPS" \
       --global-batch-size "$GLOBAL_BATCH_SIZE" \
+      --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS" \
       --save-steps "$SAVE_STEPS" \
       --save-total-limit "$SAVE_TOTAL_LIMIT" \
       --dataloader-num-workers "$DATALOADER_NUM_WORKERS" \
@@ -97,6 +102,7 @@ run_train() {
       --output-dir "$OUTPUT_DIR" \
       --max-steps "$MAX_STEPS" \
       --global-batch-size "$GLOBAL_BATCH_SIZE" \
+      --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS" \
       --save-steps "$SAVE_STEPS" \
       --save-total-limit "$SAVE_TOTAL_LIMIT" \
       --dataloader-num-workers "$DATALOADER_NUM_WORKERS" \

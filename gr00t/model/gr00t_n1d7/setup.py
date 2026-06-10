@@ -33,9 +33,61 @@ from gr00t.model.registry import register_model
 
 
 def _is_adaptive_action_head_key(key: str) -> bool:
-    return key.startswith("action_head.") and (
-        ".msat" in key or "component_" in key or "msat_decode" in key
+    if not key.startswith("action_head."):
+        return False
+    if _is_component_factored_decoder_key(key):
+        return False
+    return (
+        ".msat" in key
+        or key.startswith("action_head.component_projectors")
+        or key.startswith("action_head.component_inverse_projectors")
+        or key.startswith("action_head.component_type_embed")
+        or "msat_decode" in key
     )
+
+
+def _is_component_factored_decoder_key(key: str) -> bool:
+    return key.startswith("action_head.component_decoders") or key.startswith(
+        "action_head.extra_decoders"
+    )
+
+
+def _is_flat_action_decoder_key(key: str) -> bool:
+    return key.startswith("action_head.action_decoder")
+
+
+def _load_pretrained_state_dict(checkpoint_path: str) -> dict[str, torch.Tensor]:
+    import json
+
+    from safetensors.torch import load_file
+
+    path = Path(checkpoint_path)
+    index_file = path / "model.safetensors.index.json"
+    if index_file.exists():
+        index = json.loads(index_file.read_text())
+        state: dict[str, torch.Tensor] = {}
+        for shard in sorted(set(index["weight_map"].values())):
+            state.update(load_file(str(path / shard)))
+        return state
+    single = path / "model.safetensors"
+    if single.exists():
+        return load_file(str(single))
+    raise FileNotFoundError(f"No safetensors checkpoint found under {checkpoint_path}")
+
+
+def _init_component_factored_decoders(model, checkpoint_path: str) -> None:
+    action_head = getattr(model, "action_head", None)
+    if action_head is None or not hasattr(
+        action_head, "load_flat_decoder_into_component_decoders"
+    ):
+        return
+    ckpt_state = _load_pretrained_state_dict(checkpoint_path)
+    flat_state = {
+        key.removeprefix("action_head.action_decoder."): value
+        for key, value in ckpt_state.items()
+        if key.startswith("action_head.action_decoder.")
+    }
+    action_head.load_flat_decoder_into_component_decoders(flat_state)
 
 
 def _is_legacy_action_head_key(key: str) -> bool:
@@ -139,9 +191,13 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     setattr(model_cfg, motion_field, getattr(self.config.model, motion_field))
             for adaptive_field in (
                 "use_adaptive_component_head",
+                "use_component_factored_head",
                 "component_projector_dims",
                 "component_loss_weights",
                 "component_msat_cfg",
+                "component_action_key_order",
+                "component_action_key_dims",
+                "component_layout_embodiment_tag",
             ):
                 if hasattr(self.config.model, adaptive_field):
                     setattr(model_cfg, adaptive_field, getattr(self.config.model, adaptive_field))
@@ -166,19 +222,32 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             unexpected_keys = loading_info.get("unexpected_keys", [])
             mismatched_keys = loading_info.get("mismatched_keys", [])
             use_adaptive = getattr(model.config, "use_adaptive_component_head", False)
+            use_factored = getattr(model.config, "use_component_factored_head", False)
             other_missing = [
                 k
                 for k in missing_keys
                 if "mask_token" not in k
                 and not is_motion_missing_key(k)
                 and not (use_adaptive and _is_adaptive_action_head_key(k))
+                and not (use_factored and _is_component_factored_decoder_key(k))
             ]
             if use_adaptive:
                 unexpected_keys = [k for k in unexpected_keys if not _is_legacy_action_head_key(k)]
+            elif use_factored:
+                unexpected_keys = [
+                    k
+                    for k in unexpected_keys
+                    if not _is_adaptive_action_head_key(k)
+                    and not _is_flat_action_decoder_key(k)
+                ]
             elif getattr(model.config, "use_adaptive_component_head", False) is False:
                 unexpected_keys = [
                     k for k in unexpected_keys if not _is_adaptive_action_head_key(k)
                 ]
+            if use_factored:
+                _init_component_factored_decoders(
+                    model, self.config.training.start_from_checkpoint
+                )
             if getattr(model.config, "use_motion", False):
                 motion_block = getattr(model.backbone.model.visual, "motion_block", None)
                 if motion_block is None:

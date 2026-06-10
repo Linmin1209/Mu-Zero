@@ -144,6 +144,12 @@ class Gr00tN1d7Config(PretrainedConfig):
     component_loss_weights: dict[str, float] | None = None
     component_msat_cfg: dict | None = None
 
+    # Native DiT + per-component CategorySpecificMLP decoders (pretrained DiT load)
+    use_component_factored_head: bool = False
+    component_action_key_order: list[str] | None = None
+    component_action_key_dims: dict[str, int] | None = None
+    component_layout_embodiment_tag: str | None = None
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():

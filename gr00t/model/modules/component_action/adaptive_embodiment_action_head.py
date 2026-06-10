@@ -22,6 +22,10 @@ from gr00t.model.modules.component_action.component_schema import (
     DEFAULT_COMPONENT_LOSS_WEIGHTS,
 )
 from gr00t.model.modules.component_action.msat_joint import ComponentActionMSAT
+from gr00t.model.modules.component_action.inference_utils import (
+    build_rtc_velocity_strength,
+    inpaint_component_rtc_prefix,
+)
 from gr00t.model.modules.component_action.packing import (
     pack_action_stream,
     unpack_action_predictions_batched,
@@ -310,6 +314,36 @@ class AdaptiveEmbodimentActionHead(nn.Module):
                     batch_size, self.action_horizon, dim, device=device, dtype=dtype
                 )
 
+        vel_strength: dict[str, torch.Tensor] | None = None
+        rtc_overlap = 0
+        if options and options.get("rtc_overlap_steps", 0) > 0:
+            prev = getattr(action_input, "component_actions", None)
+            if prev is None and isinstance(action_input, dict):
+                prev = action_input.get("component_actions")
+            if prev:
+                rtc_overlap = int(options["rtc_overlap_steps"])
+                frozen = int(options.get("rtc_frozen_steps", max(1, rtc_overlap // 3)))
+                ramp_rate = float(options.get("rtc_ramp_rate", 4.0))
+                prev_t: dict[str, torch.Tensor] = {}
+                for comp, tensor in prev.items():
+                    if torch.is_tensor(tensor):
+                        prev_t[comp] = tensor.to(device=device, dtype=dtype)
+                    else:
+                        prev_t[comp] = torch.as_tensor(tensor, device=device, dtype=dtype)
+                inpaint_component_rtc_prefix(component_noise, prev_t, rtc_overlap)
+                vel_strength = {}
+                for comp, noise in component_noise.items():
+                    vel_strength[comp] = build_rtc_velocity_strength(
+                        horizon=noise.shape[1],
+                        action_dim=noise.shape[2],
+                        overlap_steps=rtc_overlap,
+                        frozen_steps=frozen,
+                        ramp_rate=ramp_rate,
+                        device=device,
+                        dtype=dtype,
+                        batch_size=batch_size,
+                    )
+
         dt = 1.0 / self.num_inference_timesteps
         for step in range(self.num_inference_timesteps):
             t_cont = step / float(self.num_inference_timesteps)
@@ -328,7 +362,8 @@ class AdaptiveEmbodimentActionHead(nn.Module):
                 sa_out, self._last_packed, self.component_inverse_projectors
             )
             for comp, vel in pred_velocity.items():
-                component_noise[comp] = component_noise[comp] + dt * vel
+                gate = vel_strength[comp] if vel_strength is not None else 1.0
+                component_noise[comp] = component_noise[comp] + dt * vel * gate
 
         return BatchFeature(
             data={

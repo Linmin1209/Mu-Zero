@@ -289,6 +289,7 @@ class Gr00tN1d7Processor(BaseProcessor):
             model_name=model_name,
             model_type=model_type,
             transformers_loading_kwargs=transformers_loading_kwargs,
+            use_adaptive_component_head=use_adaptive_component_head,
         )
         self.train()
 
@@ -399,6 +400,29 @@ class Gr00tN1d7Processor(BaseProcessor):
                 )
                 out_dict[key] = tensor[..., start : start + dim]
                 start += dim
+        # Component head does not predict meta keys (e.g. control_mode); fill training constants.
+        ref_tensor = next(iter(component_actions.values()))
+        action_horizon = ref_tensor.shape[-2]
+        batch_shape = ref_tensor.shape[:-2]
+        action_keys = self.modality_configs[embodiment_tag.value]["action"].modality_keys
+        for key in action_keys:
+            if key in schema.skip_dataset_keys and key not in out_dict:
+                dim = int(
+                    self.state_action_processor.norm_params[embodiment_tag.value]["action"][key][
+                        "dim"
+                    ].item()
+                )
+                # RoboCasa365 PickPlace teleop: control_mode is constant normalized -1 (arm mode).
+                out_dict[key] = np.full(
+                    batch_shape + (action_horizon, dim), -1.0, dtype=np.float32
+                )
+        # Arm-only tasks keep control_mode=-1; suppress spurious base motion predictions.
+        if (
+            "base_motion" in out_dict
+            and "control_mode" in out_dict
+            and np.all(out_dict["control_mode"] < 0.5)
+        ):
+            out_dict["base_motion"] = np.zeros_like(out_dict["base_motion"])
         stripped_state = None
         if state is not None:
             stripped_state = {k.replace("state.", ""): v for k, v in state.items()}
@@ -841,6 +865,9 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "clip_outliers": self.clip_outliers,
                 "apply_sincos_state_encoding": self.apply_sincos_state_encoding,
                 "use_relative_action": self.use_relative_action,
+                # Adaptive component action head
+                "use_adaptive_component_head": self.use_adaptive_component_head,
+                "component_projector_dims": self.component_projector_dims,
                 # State augmentation
                 "exclude_state": self.exclude_state,
                 "state_dropout_prob": self.state_dropout_prob,
@@ -933,6 +960,8 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "max_action_horizon",
                 "max_state_dim",
                 "max_action_dim",
+                "use_adaptive_component_head",
+                "component_projector_dims",
             ]
             for key in override_keys:
                 if key in kwargs:

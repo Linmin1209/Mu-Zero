@@ -82,6 +82,9 @@ class FinetuneConfig:
     use_adaptive_component_head: bool = False
     """If True, use component-level AdaptiveEmbodimentActionHead instead of flat DiT head."""
 
+    use_component_factored_head: bool = False
+    """If True, keep native AlternateVLDiT and use per-component CategorySpecificMLP decoders."""
+
     tune_projector: bool = True
     """If True, fine-tune the multimodal projector layers that map vision/language features to a shared space."""
 

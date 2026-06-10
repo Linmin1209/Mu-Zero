@@ -179,6 +179,10 @@ class Gr00tPolicy(BasePolicy):
             if k != "rl_info"
         }
         self.collate_fn = self.processor.collator
+        self._component_rtc_cache: dict[str, np.ndarray] | None = None
+        self._use_adaptive_component_head = bool(
+            getattr(self.model.config, "use_adaptive_component_head", False)
+        )
 
         # Extract and validate language configuration
         # Some embodiments (e.g. OXE_DROID) define multiple language keys for
@@ -427,14 +431,40 @@ class Gr00tPolicy(BasePolicy):
         collated_inputs = self.collate_fn(processed_inputs)
         collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
 
+        rtc_options = dict(options or {})
+        if self._use_adaptive_component_head and self._component_rtc_cache is not None:
+            rtc_options.setdefault("rtc_overlap_steps", 12)
+            rtc_options.setdefault("rtc_frozen_steps", 4)
+            rtc_options.setdefault("rtc_ramp_rate", 4.0)
+            model_inputs = collated_inputs["inputs"] if "inputs" in collated_inputs else collated_inputs
+            rtc_tensors = {
+                comp: torch.as_tensor(arr, device=self.model.device, dtype=torch.bfloat16)
+                for comp, arr in self._component_rtc_cache.items()
+            }
+            model_inputs["component_actions"] = rtc_tensors
+            if "inputs" in collated_inputs:
+                collated_inputs["inputs"] = model_inputs
+
         # Step 4: Run model inference to predict actions
         with torch.inference_mode():
-            model_pred = self.model.get_action(**collated_inputs)
+            model_pred = self.model.get_action(
+                **collated_inputs,
+                options=rtc_options if rtc_options else None,
+            )
         if "component_action_pred" in model_pred:
             component_pred = model_pred["component_action_pred"]
             normalized_action = {
                 comp: tensor.float().cpu().numpy() for comp, tensor in component_pred.items()
             }
+            if self._use_adaptive_component_head:
+                from gr00t.model.modules.component_action.inference_utils import (
+                    smooth_normalized_components,
+                )
+
+                normalized_action = smooth_normalized_components(normalized_action, window=3)
+                self._component_rtc_cache = {
+                    comp: arr.copy() for comp, arr in normalized_action.items()
+                }
         else:
             normalized_action = model_pred["action_pred"].float().cpu().numpy()
 
@@ -445,6 +475,10 @@ class Gr00tPolicy(BasePolicy):
         unnormalized_action = self.processor.decode_action(
             normalized_action, self.embodiment_tag, batched_states
         )
+        if self._use_adaptive_component_head:
+            from gr00t.model.modules.component_action.inference_utils import smooth_decoded_actions
+
+            unnormalized_action = smooth_decoded_actions(unnormalized_action, window=3)
 
         # Cast all actions to float32 for consistency
         casted_action = {
@@ -509,6 +543,7 @@ class Gr00tPolicy(BasePolicy):
         Returns:
             Dictionary containing the info after resetting the policy
         """
+        self._component_rtc_cache = None
         return {}
 
 

@@ -15,6 +15,12 @@
 # Single task + MOSS:
 #   ROBOCASA365_TASKS=NavigateKitchen USE_MOTION=1 bash launch_huawei_robocasa365.sh
 #
+# Native DiT + per-component MLP decoders (loads pretrained AlternateVLDiT):
+#   ROBOCASA365_TASKS=PickPlaceToasterToCounter USE_COMPONENT_FACTORED=1 bash launch_huawei_robocasa365.sh
+#
+# Legacy adaptive MSAT head (decoder trains from scratch — not recommended):
+#   USE_ADAPTIVE_COMPONENT=1 bash launch_huawei_robocasa365.sh
+#
 # Skip downloads (code/models/data already on /cache):
 #   DOWNLOAD_CODE=0 DOWNLOAD_MODELS=0 DOWNLOAD_DATA=0 bash launch_huawei_robocasa365.sh
 #
@@ -94,13 +100,26 @@ SAVE_STEPS="${SAVE_STEPS:-5000}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-8}"
 MODALITY_CONFIG="${MODALITY_CONFIG:-$REPO_ROOT/examples/RoboCasa365/robocasa365_config_4frame.py}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/output/rc365_huawei_${ROBOCASA365_CATEGORY}_${MAX_STEPS}}"
 
 USE_MOTION="${USE_MOTION:-1}"
 MOTION_INSERT_LAYER="${MOTION_INSERT_LAYER:-9}"
 TUNE_MOTION="${TUNE_MOTION:-1}"
 USE_ADAPTIVE_COMPONENT="${USE_ADAPTIVE_COMPONENT:-0}"
+USE_COMPONENT_FACTORED="${USE_COMPONENT_FACTORED:-0}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
+
+if [[ "$USE_ADAPTIVE_COMPONENT" == "1" && "$USE_COMPONENT_FACTORED" == "1" ]]; then
+  echo "[ERROR] USE_ADAPTIVE_COMPONENT and USE_COMPONENT_FACTORED are mutually exclusive."
+  exit 1
+fi
+
+HEAD_SUFFIX=""
+if [[ "$USE_COMPONENT_FACTORED" == "1" ]]; then
+  HEAD_SUFFIX="_component_factored"
+elif [[ "$USE_ADAPTIVE_COMPONENT" == "1" ]]; then
+  HEAD_SUFFIX="_adaptive_component"
+fi
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/output/rc365_huawei_${ROBOCASA365_CATEGORY}_${MAX_STEPS}${HEAD_SUFFIX}}"
 
 # ==============================================================================
 # Helpers
@@ -351,6 +370,7 @@ export UPLOAD_OBS_BASE="${OBS_UPLOAD_DEST}/$(date '+%Y%m%d_%H%M%S')"
 echo "[i] dataset root: $ROBOCASA365_ROOT"
 echo "[i] base model:   $GR00T_BASE_MODEL"
 echo "[i] output:       $OUTPUT_DIR"
+echo "[i] use_motion=$USE_MOTION use_component_factored=$USE_COMPONENT_FACTORED use_adaptive_component=$USE_ADAPTIVE_COMPONENT"
 echo "[i] OBS upload:   $UPLOAD_OBS_BASE"
 
 EXTRA=(--robocasa365-root "$ROBOCASA365_ROOT" --robocasa365-split "$ROBOCASA365_SPLIT" --robocasa365-category "$ROBOCASA365_CATEGORY")
@@ -362,6 +382,9 @@ MOTION_ARGS=()
 
 ADAPTIVE_ARGS=()
 [[ "$USE_ADAPTIVE_COMPONENT" == "1" ]] && ADAPTIVE_ARGS+=(--use-adaptive-component-head)
+
+FACTORED_ARGS=()
+[[ "$USE_COMPONENT_FACTORED" == "1" ]] && FACTORED_ARGS+=(--use-component-factored-head)
 
 GC_ARGS=()
 [[ "$GRADIENT_CHECKPOINTING" == "1" ]] && GC_ARGS+=(--gradient-checkpointing)
@@ -379,6 +402,7 @@ COMMON=(
   --dataloader-num-workers "$DATALOADER_NUM_WORKERS"
   "${MOTION_ARGS[@]}"
   "${ADAPTIVE_ARGS[@]}"
+  "${FACTORED_ARGS[@]}"
   "${GC_ARGS[@]}"
 )
 
