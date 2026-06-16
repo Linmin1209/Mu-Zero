@@ -55,6 +55,37 @@ LE_ROBOT_REL_STATS_FILENAME = "meta/relative_stats.json"
 logger = logging.getLogger(__name__)
 
 
+def _should_compute_dataset_statistics(feature_name: str, feature_meta: dict) -> bool:
+    """Whether to compute mean/std stats for a LeRobot parquet column.
+
+    Trajectory visual-prompt columns (``trajectory.*``) are auxiliary labels with
+    multi-step UV arrays. They are not used for state/action normalization during
+    training and some (e.g. ``*_future_uv``) are stored as nested sequences that
+    cannot be stacked by the scalar stats path.
+    """
+    if feature_name.startswith("trajectory."):
+        return False
+    dtype = str(feature_meta.get("dtype", ""))
+    if "float" not in dtype:
+        return False
+    shape = feature_meta.get("shape") or []
+    # Skip rank>1 tensors (e.g. future_uv with shape [50, 2]).
+    if len(shape) > 1:
+        return False
+    return True
+
+
+def _stack_feature_rows(values) -> np.ndarray:
+    """Stack per-row feature values into a 2D float array for stats."""
+    rows: list[np.ndarray] = []
+    for x in values:
+        arr = np.asarray(x, dtype=np.float32)
+        if arr.dtype == object:
+            arr = np.stack([np.asarray(e, dtype=np.float32) for e in arr], axis=0)
+        rows.append(arr.reshape(-1))
+    return np.vstack(rows)
+
+
 def _load_stats_cache(path: Path) -> dict[str, Any]:
     """Load a stats JSON cache, treating any unreadable state as "no cache".
 
@@ -159,9 +190,7 @@ def calculate_dataset_statistics(
         features = list(all_low_dim_data.columns)
     for le_modality in features:
         print(f"Computing statistics for {le_modality}...")
-        np_data = np.vstack(
-            [np.asarray(x, dtype=np.float32) for x in all_low_dim_data[le_modality]]
-        )
+        np_data = _stack_feature_rows(all_low_dim_data[le_modality])
         dataset_statistics[le_modality] = dict(
             mean=np.mean(np_data, axis=0).tolist(),
             std=np.std(np_data, axis=0).tolist(),
@@ -196,8 +225,8 @@ def generate_stats(dataset_path: Path | str):
     lowdim_features = []
     with open(dataset_path / LE_ROBOT_INFO_FILENAME, "r") as f:
         le_features = json.load(f)["features"]
-    for feature in le_features:
-        if "float" in le_features[feature]["dtype"]:
+    for feature, meta in le_features.items():
+        if _should_compute_dataset_statistics(feature, meta):
             lowdim_features.append(feature)
     if check_stats_validity(dataset_path, lowdim_features):
         return

@@ -4,7 +4,8 @@
 """
 RoboCasa365 modality config with 4-frame video history: delta_indices [-6, -4, -2, 0].
 
-State / language stay at the current timestep ([0]). Action horizon unchanged (40).
+Same as robocasa365_config_4frame.py but without tactile — required for full pretrain
+mixtures where most tasks lack tactile.* parquet columns (MOSS / motion-only training).
 """
 
 from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
@@ -80,13 +81,8 @@ robocasa365_panda_omron_config = {
         delta_indices=[0],
         modality_keys=["annotation.human.task_description"],
     ),
-    "tactile": ModalityConfig(
-        delta_indices=list(range(ACTION_HORIZON)),
-        modality_keys=["left", "right", "contact"],
-    ),
 }
 
-# Override pre-registered sim keys so finetune uses human-dataset field names.
 MODALITY_CONFIGS[EmbodimentTag.ROBOCASA_PANDA_OMRON.value] = robocasa365_panda_omron_config
 
 ROBOCASA365_COMPONENT_PROJECTOR_DIMS = {

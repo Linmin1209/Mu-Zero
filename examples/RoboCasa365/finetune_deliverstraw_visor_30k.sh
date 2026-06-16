@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Finetune GR00T N1.7 on RoboCasa365 NavigateKitchen (30k steps)
-# with AdaptiveEmbodimentActionHead + STSS/MOSS (4-frame video).
-# Default: 2-GPU distributed training (override via NUM_GPUS / CUDA_VISIBLE_DEVICES).
+# Finetune GR00T N1.7 on RoboCasa365 DeliverStraw (30k steps)
+# with component-factored decoders + VISOR suffix IHT + tactile auxiliary loss.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,22 +9,19 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/env_defaults.sh"
 
 ROBOCASA365_SPLIT="${ROBOCASA365_SPLIT:-pretrain}"
-ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-atomic}"
-ROBOCASA365_TASKS="${ROBOCASA365_TASKS:-NavigateKitchen}"
+ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-composite}"
+ROBOCASA365_TASKS="${ROBOCASA365_TASKS:-DeliverStraw}"
 MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config_4frame.py}"
-OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_NavigateKitchen_30k_b64_4frame_adaptive_component}"
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_DeliverStraw_30k_b64_4frame_visor}"
 LOG_FILE="${LOG_FILE:-$OUTPUT_DIR/train.log}"
 
-NUM_GPUS="${NUM_GPUS:-2}"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+NUM_GPUS="${NUM_GPUS:-1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 MAX_STEPS=30000
-# Per-GPU micro batch = global_batch_size / num_gpus. Adaptive MSAT OOMs at 16/GPU on 80GB.
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-16}"
-GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 SAVE_STEPS="${SAVE_STEPS:-5000}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-10}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-8}"
-GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
 
 USE_MOTION="${USE_MOTION:-1}"
 MOTION_INSERT_LAYER="${MOTION_INSERT_LAYER:-9}"
@@ -39,16 +35,15 @@ echo "[i] dataset: $ROBOCASA365_ROOT"
 echo "[i] base model: $GR00T_BASE_MODEL"
 echo "[i] Task: $ROBOCASA365_TASKS"
 echo "[i] Split/category: $ROBOCASA365_SPLIT / $ROBOCASA365_CATEGORY"
-echo "[i] modality config: $MODALITY_CONFIG (video delta [-6,-4,-2,0])"
-echo "[i] use_adaptive_component_head=True (right_arm/right_hand/base component tokens)"
+echo "[i] modality config: $MODALITY_CONFIG (video delta [-6,-4,-2,0], tactile horizon 40)"
+echo "[i] use_component_factored_head=True use_visor=True"
 echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION"
-echo "[i] max_steps=$MAX_STEPS micro_batch=$GLOBAL_BATCH_SIZE grad_accum=$GRADIENT_ACCUMULATION_STEPS effective_batch=$((GLOBAL_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS)) num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
-echo "[i] gradient_checkpointing=$GRADIENT_CHECKPOINTING"
+echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
 echo "[i] output: $OUTPUT_DIR"
 echo "[i] log: $LOG_FILE"
 
 EXTRA=(--robocasa365-tasks "$ROBOCASA365_TASKS")
-ADAPTIVE_ARGS=(--use-adaptive-component-head)
+VISOR_ARGS=(--use-component-factored-head --use-visor)
 MOTION_ARGS=()
 if [[ "$USE_MOTION" == "1" ]]; then
   MOTION_ARGS+=(--use-motion --motion-insert-layer "$MOTION_INSERT_LAYER")
@@ -57,12 +52,6 @@ if [[ "$USE_MOTION" == "1" ]]; then
   else
     MOTION_ARGS+=(--no-tune-motion)
   fi
-fi
-GC_ARGS=()
-if [[ "$GRADIENT_CHECKPOINTING" == "1" ]]; then
-  GC_ARGS+=(--gradient-checkpointing True)
-else
-  GC_ARGS+=(--gradient-checkpointing False)
 fi
 
 run_train() {
@@ -79,17 +68,15 @@ run_train() {
       --output-dir "$OUTPUT_DIR" \
       --max-steps "$MAX_STEPS" \
       --global-batch-size "$GLOBAL_BATCH_SIZE" \
-      --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS" \
       --save-steps "$SAVE_STEPS" \
       --save-total-limit "$SAVE_TOTAL_LIMIT" \
       --dataloader-num-workers "$DATALOADER_NUM_WORKERS" \
-      "${ADAPTIVE_ARGS[@]}" \
-      "${MOTION_ARGS[@]}" \
-      "${GC_ARGS[@]}"
+      "${VISOR_ARGS[@]}" \
+      "${MOTION_ARGS[@]}"
   else
     CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" .venv/bin/python -u -m torch.distributed.run \
       --nproc_per_node="$NUM_GPUS" \
-      --master_port="${MASTER_PORT:-29502}" \
+      --master_port="${MASTER_PORT:-29500}" \
       gr00t/experiment/launch_finetune.py \
       --base-model-path "$GR00T_BASE_MODEL" \
       --robocasa365-root "$ROBOCASA365_ROOT" \
@@ -102,13 +89,11 @@ run_train() {
       --output-dir "$OUTPUT_DIR" \
       --max-steps "$MAX_STEPS" \
       --global-batch-size "$GLOBAL_BATCH_SIZE" \
-      --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS" \
       --save-steps "$SAVE_STEPS" \
       --save-total-limit "$SAVE_TOTAL_LIMIT" \
       --dataloader-num-workers "$DATALOADER_NUM_WORKERS" \
-      "${ADAPTIVE_ARGS[@]}" \
-      "${MOTION_ARGS[@]}" \
-      "${GC_ARGS[@]}"
+      "${VISOR_ARGS[@]}" \
+      "${MOTION_ARGS[@]}"
   fi
 }
 

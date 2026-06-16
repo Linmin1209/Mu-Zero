@@ -771,6 +771,27 @@ class Gr00tN1d7Processor(BaseProcessor):
             transformed_inputs["action"] = normalized_actions.to(torch.get_default_dtype())
             if action_mask is not None:
                 transformed_inputs["action_mask"] = action_mask
+
+        tactile_cfg = self.modality_configs.get(embodiment_tag.value, {}).get("tactile")
+        if tactile_cfg is not None and content.metadata.get("tactile"):
+            td = content.metadata["tactile"]
+            parts = []
+            for key in tactile_cfg.modality_keys:
+                arr = np.asarray(td[key], dtype=np.float32)
+                if arr.ndim == 1:
+                    arr = arr[:, None]
+                parts.append(arr)
+            tactile_gt = np.concatenate(parts, axis=-1)
+            horizon = tactile_gt.shape[0]
+            if horizon < self.max_action_horizon:
+                pad = np.zeros(
+                    (self.max_action_horizon - horizon, tactile_gt.shape[1]),
+                    dtype=np.float32,
+                )
+                tactile_gt = np.concatenate([tactile_gt, pad], axis=0)
+            elif horizon > self.max_action_horizon:
+                tactile_gt = tactile_gt[: self.max_action_horizon]
+            transformed_inputs["tactile_gt"] = torch.from_numpy(tactile_gt).to(torch.float32)
         # Add VLM inputs
         transformed_inputs.update(vlm_inputs)
         transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]

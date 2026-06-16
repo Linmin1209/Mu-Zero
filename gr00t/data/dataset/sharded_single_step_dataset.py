@@ -48,7 +48,7 @@ def extract_step_data(
                 raise KeyError(
                     f"{modality}.{key} not found in episode data, available keys: {episode_data.columns}"
                 )
-            if modality in ["state", "action"]:
+            if modality in ["state", "action", "tactile"]:
                 # Stack arrays for numerical modalities
                 step_data[modality][key] = np.vstack(
                     [
@@ -77,6 +77,9 @@ def extract_step_data(
         text=text,
         embodiment=embodiment_tag,
     )
+    tactile_data = step_data.get("tactile")
+    if tactile_data:
+        vla_step_data.metadata["tactile"] = tactile_data
     return vla_step_data
 
 

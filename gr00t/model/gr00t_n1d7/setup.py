@@ -52,6 +52,10 @@ def _is_component_factored_decoder_key(key: str) -> bool:
     )
 
 
+def _is_visor_key(key: str) -> bool:
+    return key.startswith("action_head.visor.")
+
+
 def _is_flat_action_decoder_key(key: str) -> bool:
     return key.startswith("action_head.action_decoder")
 
@@ -192,6 +196,12 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             for adaptive_field in (
                 "use_adaptive_component_head",
                 "use_component_factored_head",
+                "use_visor",
+                "visor_iht_tokens",
+                "visor_hidden_dim",
+                "visor_loss_weight_tactile",
+                "visor_contact_loss_weight",
+                "tune_visor",
                 "component_projector_dims",
                 "component_loss_weights",
                 "component_msat_cfg",
@@ -223,6 +233,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             mismatched_keys = loading_info.get("mismatched_keys", [])
             use_adaptive = getattr(model.config, "use_adaptive_component_head", False)
             use_factored = getattr(model.config, "use_component_factored_head", False)
+            use_visor = getattr(model.config, "use_visor", False)
             other_missing = [
                 k
                 for k in missing_keys
@@ -230,6 +241,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 and not is_motion_missing_key(k)
                 and not (use_adaptive and _is_adaptive_action_head_key(k))
                 and not (use_factored and _is_component_factored_decoder_key(k))
+                and not (use_visor and _is_visor_key(k))
             ]
             if use_adaptive:
                 unexpected_keys = [k for k in unexpected_keys if not _is_legacy_action_head_key(k)]

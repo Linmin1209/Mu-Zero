@@ -190,6 +190,31 @@ def compute_eval_accuracy(
         return {}
 
 
+def _scalar_from_outputs(outputs: Any, key: str) -> float | None:
+    if outputs is None:
+        return None
+    val = None
+    if isinstance(outputs, dict):
+        val = outputs.get(key)
+    elif hasattr(outputs, key):
+        val = getattr(outputs, key)
+    elif hasattr(outputs, "data") and isinstance(outputs.data, dict):
+        val = outputs.data.get(key)
+    if val is None:
+        return None
+    if torch.is_tensor(val):
+        t = val.detach().float().reshape(())
+        if t.numel() != 1:
+            logging.warning(
+                "Expected scalar metric %s but got shape %s; using mean.",
+                key,
+                tuple(val.shape),
+            )
+            t = val.detach().float().mean().reshape(())
+        return t.item()
+    return float(val)
+
+
 class Gr00tTrainer(Trainer):
     """Trainer that bypasses torch dataloader and makes data collator async."""
 
@@ -259,6 +284,9 @@ class Gr00tTrainer(Trainer):
         # multiprocessing_context can only be used with num_workers > 0
         if self.args.dataloader_num_workers > 0:
             dataloader_params["multiprocessing_context"] = self.multiprocessing_context
+            prefetch = getattr(self.args, "dataloader_prefetch_factor", None)
+            if prefetch is not None and prefetch > 0:
+                dataloader_params["prefetch_factor"] = prefetch
 
         return torch.utils.data.DataLoader(self.train_dataset, **dataloader_params)
 
@@ -322,6 +350,34 @@ class Gr00tTrainer(Trainer):
 
         # Record last loss for testing purposes.
         self.loss = loss
+
+        if (
+            self.state.global_step % self.args.logging_steps == 0
+            and model.training
+            and self.args.local_rank in (-1, 0)
+        ):
+            visor_metrics: dict[str, float] = {}
+            for key in (
+                "flow_loss",
+                "tactile_loss",
+                "visor_lambda_eff",
+                "visor_contact_rate",
+                "visor_force_step_rate",
+            ):
+                value = _scalar_from_outputs(outputs, key)
+                if value is not None:
+                    visor_metrics[key] = value
+            if visor_metrics:
+                self.log(visor_metrics)
+                logging.info(
+                    "Step %d — flow_loss=%.6f tactile_loss=%.6f "
+                    "contact_rate=%s force_step_rate=%s",
+                    self.state.global_step,
+                    visor_metrics.get("flow_loss", float("nan")),
+                    visor_metrics.get("tactile_loss", float("nan")),
+                    visor_metrics.get("visor_contact_rate", "n/a"),
+                    visor_metrics.get("visor_force_step_rate", "n/a"),
+                )
 
         # --------------------------------------------------------------
         # Accuracy calculation

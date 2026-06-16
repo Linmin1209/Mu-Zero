@@ -56,7 +56,7 @@ LEROBOT_MODALITY_FILENAME = "modality.json"
 LEROBOT_STATS_FILE_NAME = "stats.json"
 LEROBOT_RELATIVE_STATS_FILE_NAME = "relative_stats.json"
 
-ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask"]
+ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask", "tactile"]
 DEFAULT_COLUMN_NAMES = {
     "state": "observation.state",
     "action": "action",
@@ -392,6 +392,15 @@ class LeRobotEpisodeLoader:
             )
             for joint_group in joint_groups_df.columns:
                 loaded_df[f"{modality_type}.{joint_group}"] = joint_groups_df[joint_group]
+
+        if "tactile" in self.modality_configs:
+            for key in self.modality_configs["tactile"].modality_keys:
+                col = f"tactile.{key}"
+                if col not in original_df.columns:
+                    raise KeyError(
+                        f"{col} not found in parquet; available: {list(original_df.columns)}"
+                    )
+                loaded_df[col] = original_df[col]
 
         return loaded_df
 

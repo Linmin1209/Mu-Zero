@@ -150,6 +150,14 @@ class Gr00tN1d7Config(PretrainedConfig):
     component_action_key_dims: dict[str, int] | None = None
     component_layout_embodiment_tag: str | None = None
 
+    # VISOR: imagined haptics bridge (requires component_factored_head or use_visor path)
+    use_visor: bool = False
+    visor_iht_tokens: int = 2
+    visor_hidden_dim: int = 256
+    visor_loss_weight_tactile: float = 0.5
+    visor_contact_loss_weight: float = 1.0
+    tune_visor: bool = True
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():

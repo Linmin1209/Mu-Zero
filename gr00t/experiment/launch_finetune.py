@@ -145,10 +145,15 @@ if __name__ == "__main__":
     config.model.tune_motion = ft_config.tune_motion
     config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
     config.model.use_component_factored_head = ft_config.use_component_factored_head
+    config.model.use_visor = ft_config.use_visor
+    config.model.visor_loss_weight_tactile = ft_config.visor_loss_weight_tactile
+    config.model.visor_contact_loss_weight = ft_config.visor_contact_loss_weight
     if ft_config.use_adaptive_component_head and ft_config.use_component_factored_head:
         raise ValueError(
             "Choose at most one of --use-adaptive-component-head and --use-component-factored-head."
         )
+    if ft_config.use_visor and not ft_config.use_component_factored_head:
+        raise ValueError("--use-visor requires --use-component-factored-head.")
     if ft_config.use_adaptive_component_head:
         component_dims = None
         if ft_config.modality_config_path:
@@ -195,6 +200,10 @@ if __name__ == "__main__":
             "[i] ComponentFactoredActionHead enabled "
             "(native AlternateVLDiT + per-component CategorySpecificMLP decoders)"
         )
+    if ft_config.use_visor:
+        print(
+            f"[i] VISOR enabled (suffix IHT + tactile aux, weight={ft_config.visor_loss_weight_tactile})"
+        )
     if ft_config.use_motion:
         print(
             f"[i] STSS/MOSS enabled at vision layer {ft_config.motion_insert_layer}; "
@@ -213,7 +222,9 @@ if __name__ == "__main__":
     else:
         config.model.extra_augmentation_config = None
 
-    config.model.load_bf16 = False
+    config.model.load_bf16 = ft_config.load_bf16
+    if ft_config.load_bf16:
+        print("[i] load_bf16=True (FlashAttention-2 + bf16 vision forward)")
     config.model.reproject_vision = False
     config.model.model_name = cosmos_path
     config.training.transformers_local_files_only = True
@@ -225,7 +236,8 @@ if __name__ == "__main__":
     config.model.use_relative_action = True
 
     config.training.experiment_name = ft_config.experiment_name
-    config.training.optim = "adamw_torch"
+    config.training.optim = ft_config.optim
+    print(f"[i] optim={ft_config.optim}")
     config.training.global_batch_size = ft_config.global_batch_size
     config.training.dataloader_num_workers = ft_config.dataloader_num_workers
     config.training.learning_rate = ft_config.learning_rate
@@ -243,6 +255,8 @@ if __name__ == "__main__":
     config.data.shard_size = ft_config.shard_size
     config.data.episode_sampling_rate = ft_config.episode_sampling_rate
     config.data.num_shards_per_epoch = ft_config.num_shards_per_epoch
+    config.data.video_backend = ft_config.video_backend
+    config.training.dataloader_prefetch_factor = ft_config.dataloader_prefetch_factor
 
     from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
 

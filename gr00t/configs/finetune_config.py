@@ -85,6 +85,15 @@ class FinetuneConfig:
     use_component_factored_head: bool = False
     """If True, keep native AlternateVLDiT and use per-component CategorySpecificMLP decoders."""
 
+    use_visor: bool = False
+    """If True, enable VISOR suffix IHT + tactile auxiliary loss (implies component-factored decode)."""
+
+    visor_loss_weight_tactile: float = 0.5
+    """Weight on Huber/BCE tactile auxiliary loss."""
+
+    visor_contact_loss_weight: float = 1.0
+    """Relative weight on contact BCE within tactile loss."""
+
     tune_projector: bool = True
     """If True, fine-tune the multimodal projector layers that map vision/language features to a shared space."""
 
@@ -195,3 +204,15 @@ class FinetuneConfig:
     """If True, skip loading model weights from base_model_path (architecture only).
     The processor (tokenizer/config) is still loaded from base_model_path.
     Useful for CI/testing to skip the slow checkpoint shard loading."""
+
+    load_bf16: bool = True
+    """Load Cosmos/Qwen3 backbone weights in bf16 (enables FlashAttention-2, faster vision forward)."""
+
+    optim: str = "adamw_torch_fused"
+    """Optimizer passed to HuggingFace TrainingArguments (adamw_torch_fused is fastest on A100/A800)."""
+
+    video_backend: str = "torchcodec"
+    """Video decode backend for LeRobotEpisodeLoader (torchcodec or decord)."""
+
+    dataloader_prefetch_factor: int = 2
+    """DataLoader prefetch batches per worker (only used when dataloader_num_workers > 0)."""
