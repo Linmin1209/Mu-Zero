@@ -184,3 +184,4 @@ examples/RoboCasa365/local_paths.sh
 
 # Local deploy scripts with OBS credentials
 launch_huawei.sh
+examples/RoboCasa365/baselines/leo/data/manifest_target50_pretrain.jsonl

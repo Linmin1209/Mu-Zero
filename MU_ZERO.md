@@ -53,6 +53,21 @@ GR00T_CKPT=/path/to/checkpoint-30000 \
 
 See `examples/RoboCasa365/README.md` for task sets, flags, and two-process eval layout.
 
+### Baselines (RoboCasa365 target50)
+
+| Baseline | Path | Notes |
+|----------|------|-------|
+| DynaMem | `examples/RoboCasa365/baselines/dynamem/` | Oracle sim controller |
+| LEO | `examples/RoboCasa365/baselines/leo/` | LoRA on Vicuna-7B (bridge trainer) |
+| Echo VLA | `examples/RoboCasa365/baselines/echo_vla/` | PI0.5 / DDPM via external `Echo_VLA` repo |
+
+```bash
+export ECHO_VLA_REPO=/path/to/UR-manipulation-modelscope/Echo_VLA
+bash examples/RoboCasa365/baselines/echo_vla/setup_echo_vla.sh
+export MODEL_PATH=/path/to/echo_checkpoint
+bash examples/RoboCasa365/baselines/echo_vla/run_echo_vla_baseline.sh
+```
+
 ## Layout
 
 | Path | Description |

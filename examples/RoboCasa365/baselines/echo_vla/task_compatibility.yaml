@@ -1,0 +1,39 @@
+# Echo VLA × RoboCasa365 target50 compatibility (v1).
+# status: supported | train_only | zero_shot | na
+
+defaults:
+  status: zero_shot
+  notes: "No Echo classic env mapping; RC365 sim eval only if policy trained on RC365 data"
+
+supported:
+  - NavigateKitchen
+  - PickPlaceCounterToStove
+  - PickPlaceSinkToCounter
+  - PickPlaceCounterToCabinet
+  - PickPlaceDrawerToCounter
+  - TurnOnSinkFaucet
+  - OpenDrawer
+  - OpenCabinet
+
+train_only:
+  - PickPlaceToasterToCounter
+  notes: "Approximate echo_env PnPMicrowaveToCounter; verify object layout"
+
+na:
+  - ArrangeBreadBasket
+  - ArrangeTea
+  - BreadSelection
+  - CategorizeCondiments
+  - CuttingToolSelection
+  - GarnishPancake
+  - GatherTableware
+  - HeatKebabSandwich
+  - MakeIceLemonade
+  - PanTransfer
+  - PortionHotDogs
+  - RecycleBottlesByType
+  - SeparateFreezerRack
+  - WaffleReheat
+  - WashFruitColander
+  - WeighIngredients
+  notes: "RC365 composite_unseen; no Echo pretrain mapping yet"

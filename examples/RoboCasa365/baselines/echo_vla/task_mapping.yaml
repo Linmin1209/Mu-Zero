@@ -1,0 +1,50 @@
+# RoboCasa365 task name → Echo VLA classic RoboCasa env name.
+# Tasks without echo_env are eval-only via RC365 gym (policy must generalize zero-shot).
+
+NavigateKitchen:
+  echo_env: NavigateKitchen
+  mode: nav
+
+PickPlaceCounterToStove:
+  echo_env: PnPCounterToStove
+  mode: manipulation
+
+PickPlaceSinkToCounter:
+  echo_env: PnPSinkToCounter
+  mode: manipulation
+
+PickPlaceCounterToCabinet:
+  echo_env: PnPCabToCounter
+  mode: manipulation
+
+PickPlaceDrawerToCounter:
+  echo_env: PnPCounterToDrawer
+  mode: manipulation
+
+PickPlaceToasterToCounter:
+  echo_env: PnPMicrowaveToCounter
+  mode: manipulation
+
+TurnOnSinkFaucet:
+  echo_env: TurnOnSinkFaucet
+  mode: manipulation
+
+TurnOnMicrowave:
+  echo_env: TurnOnMicrowave
+  mode: manipulation
+
+OpenDrawer:
+  echo_env: OpenDrawer
+  mode: manipulation
+
+OpenCabinet:
+  echo_env: OpenSingleDoor
+  mode: manipulation
+
+CloseFridge:
+  echo_env: CloseSingleDoor
+  mode: manipulation
+
+TurnOffStove:
+  echo_env: TurnOffStove
+  mode: manipulation

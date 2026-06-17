@@ -1,0 +1,215 @@
+# DynaMem vs RoboCasa365 benchmark tasks (50 tasks in task_sets.yaml).
+#
+# status:
+#   na              - out of DynaMem scope (leave success_rate empty)
+#   navigate_only   - navigate(A) only
+#   ovmm            - pick(A)+place(B) decomposed pipeline on sim
+#   composite_na    - multi-step workflow beyond single OVMM command
+#
+# RoboCasa365 sim uses Panda-Omron. eval_dynamem_robocasa365.py runs sim oracle baseline.
+
+defaults:
+  stretch_repo: /HOME/sysu_xdliang/sysu_xdliang_1/HDD_POOL/linmin/stretch_ai
+tasks:
+  CloseBlenderLid:
+    status: na
+    dynamem_query: ''
+    notes: Appliance lid control; not open-vocabulary pick-and-place.
+  CloseFridge:
+    status: na
+    dynamem_query: ''
+    notes: Door closing; not OVMM.
+  CloseToasterOvenDoor:
+    status: na
+    dynamem_query: ''
+    notes: Door closing; not OVMM.
+  CoffeeSetupMug:
+    status: na
+    dynamem_query: ''
+    notes: Multi-step coffee setup; not single OVMM command.
+  NavigateKitchen:
+    status: navigate_only
+    dynamem_query: Navigate to the {target_fixture}.
+    notes: DynaMem navigate(A) only; sim oracle base navigation on Panda-Omron.
+  OpenCabinet:
+    status: na
+    dynamem_query: ''
+    notes: Articulation task; not OVMM.
+  OpenDrawer:
+    status: na
+    dynamem_query: ''
+    notes: Articulation task; not OVMM.
+  OpenStandMixerHead:
+    status: na
+    dynamem_query: ''
+    notes: Articulation task; not OVMM.
+  PickPlaceCounterToCabinet:
+    status: ovmm
+    dynamem_query: Pick the object from the counter and place it in the cabinet.
+    notes: ''
+  PickPlaceCounterToStove:
+    status: ovmm
+    dynamem_query: Pick the object from the counter and place it on the stove.
+    notes: ''
+  PickPlaceDrawerToCounter:
+    status: ovmm
+    dynamem_query: Pick the object from the drawer and place it on the counter.
+    notes: ''
+  PickPlaceSinkToCounter:
+    status: ovmm
+    dynamem_query: Pick the object from the sink and place it on the counter.
+    notes: ''
+  PickPlaceToasterToCounter:
+    status: ovmm
+    dynamem_query: Pick the object from the toaster and place it on the counter.
+    notes: ''
+  SlideDishwasherRack:
+    status: na
+    dynamem_query: ''
+    notes: Articulation / sliding; not OVMM.
+  TurnOffStove:
+    status: na
+    dynamem_query: ''
+    notes: Appliance control; not OVMM.
+  TurnOnElectricKettle:
+    status: na
+    dynamem_query: ''
+    notes: Appliance control; not OVMM.
+  TurnOnMicrowave:
+    status: na
+    dynamem_query: ''
+    notes: Appliance control; not OVMM.
+  TurnOnSinkFaucet:
+    status: na
+    dynamem_query: ''
+    notes: Faucet control; not OVMM.
+  DeliverStraw:
+    status: ovmm
+    dynamem_query: Pick the straw from the drawer and place it in the glass cup on
+      the dining counter.
+    notes: Single OVMM decomposition; drawer must be open first (demo assumes open
+      layout).
+  GetToastedBread:
+    status: composite_na
+    dynamem_query: ''
+    notes: Multi-step toasting workflow; beyond one OVMM command.
+  KettleBoiling:
+    status: composite_na
+    dynamem_query: ''
+    notes: Boiling workflow; not OVMM.
+  LoadDishwasher:
+    status: composite_na
+    dynamem_query: ''
+    notes: Multi-object loading sequence.
+  PackIdenticalLunches:
+    status: composite_na
+    dynamem_query: ''
+    notes: Long-horizon packing.
+  PreSoakPan:
+    status: composite_na
+    dynamem_query: ''
+    notes: Sink + manipulation sequence.
+  PrepareCoffee:
+    status: composite_na
+    dynamem_query: ''
+    notes: Multi-step beverage prep.
+  RinseSinkBasin:
+    status: composite_na
+    dynamem_query: ''
+    notes: Washing workflow.
+  ScrubCuttingBoard:
+    status: composite_na
+    dynamem_query: ''
+    notes: Scrubbing workflow.
+  SearingMeat:
+    status: composite_na
+    dynamem_query: ''
+    notes: Cooking workflow.
+  SetUpCuttingStation:
+    status: composite_na
+    dynamem_query: ''
+    notes: Multi-object layout.
+  StackBowlsCabinet:
+    status: composite_na
+    dynamem_query: ''
+    notes: Repeated pick-place with stacking constraints.
+  SteamInMicrowave:
+    status: composite_na
+    dynamem_query: ''
+    notes: Microwave + steaming workflow.
+  StirVegetables:
+    status: composite_na
+    dynamem_query: ''
+    notes: Stove interaction workflow.
+  StoreLeftoversInBowl:
+    status: composite_na
+    dynamem_query: ''
+    notes: Multi-step storing workflow.
+  WashLettuce:
+    status: composite_na
+    dynamem_query: ''
+    notes: Washing workflow.
+  ArrangeBreadBasket:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  ArrangeTea:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  BreadSelection:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  CategorizeCondiments:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  CuttingToolSelection:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  GarnishPancake:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  GatherTableware:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  HeatKebabSandwich:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  MakeIceLemonade:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  PanTransfer:
+    status: composite_na
+    dynamem_query: ''
+    notes: Pan manipulation + stove; not generic OVMM.
+  PortionHotDogs:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  RecycleBottlesByType:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  SeparateFreezerRack:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  WaffleReheat:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  WashFruitColander:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''
+  WeighIngredients:
+    status: composite_na
+    dynamem_query: ''
+    notes: ''

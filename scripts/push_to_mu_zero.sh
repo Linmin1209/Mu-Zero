@@ -13,9 +13,18 @@ BRANCH="${MU_ZERO_BRANCH:-main}"
 FORCE="${MU_ZERO_FORCE:-1}"
 MAX_RETRIES="${MU_ZERO_MAX_RETRIES:-3}"
 PUSH_LFS="${MU_ZERO_PUSH_LFS:-0}"
+GITHUB_TOKEN="${MU_ZERO_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+
+if [[ -n "$GITHUB_TOKEN" ]]; then
+  MU_ZERO_USE_HTTPS=1
+fi
 
 if [[ "${MU_ZERO_USE_HTTPS:-0}" == "1" ]]; then
-  REMOTE_URL="${MU_ZERO_REMOTE_URL:-https://github.com/Linmin1209/Mu-Zero.git}"
+  if [[ -n "$GITHUB_TOKEN" ]]; then
+    REMOTE_URL="${MU_ZERO_REMOTE_URL:-https://x-access-token:${GITHUB_TOKEN}@github.com/Linmin1209/Mu-Zero.git}"
+  else
+    REMOTE_URL="${MU_ZERO_REMOTE_URL:-https://github.com/Linmin1209/Mu-Zero.git}"
+  fi
 else
   REMOTE_URL="${MU_ZERO_REMOTE_URL:-git@github.com:Linmin1209/Mu-Zero.git}"
 fi
@@ -27,7 +36,13 @@ else
 fi
 
 REMOTE_URL="$(git remote get-url "$REMOTE")"
-echo "[i] Remote: $REMOTE -> $REMOTE_URL"
+DISPLAY_URL="$REMOTE_URL"
+if [[ "$DISPLAY_URL" == *"x-access-token:"*"@"* ]]; then
+  DISPLAY_URL="https://x-access-token:***@github.com/Linmin1209/Mu-Zero.git"
+elif [[ "$DISPLAY_URL" == https://*@* ]]; then
+  DISPLAY_URL="https://***@github.com/Linmin1209/Mu-Zero.git"
+fi
+echo "[i] Remote: $REMOTE -> $DISPLAY_URL"
 echo "[i] Branch: $BRANCH"
 git log -1 --oneline
 echo "[i] LFS upload: $([[ "$PUSH_LFS" == "1" ]] && echo forced || echo skip-by-default, auto-on-GH008)"
@@ -102,6 +117,7 @@ push_lfs() {
 }
 
 export GIT_PROGRESS_DELAY=0
+export GIT_LFS_SKIP_PUSH="${GIT_LFS_SKIP_PUSH:-1}"
 START_TS=$(date +%s)
 
 if [[ "$PUSH_LFS" == "1" ]]; then

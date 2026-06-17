@@ -1,0 +1,33 @@
+# Echo VLA fine-tune entry for RoboCasa365-oriented experiments.
+# Copy/adjust paths then run from Echo_VLA repo via Hydra.
+
+defaults:
+  - robocasa_config_pi05
+
+# Override for RC365 LeRobot / local paths
+dataset_path: ${oc.env:DATASET_PATH,/HOME/sysu_xdliang/sysu_xdliang_1/HDD_POOL/linmin/datasets/robocasa365-datasets}
+tag: echo_vla_rc365_pi05
+agent_name: pi05_agent
+skip_simulation_after_train: true
+
+# Target tasks (RC365 names used in sim; train data may use Echo HDF5 layout)
+env_name:
+  - PickPlaceCounterToStove
+  - PickPlaceSinkToCounter
+  - NavigateKitchen
+
+epoch: 60
+train_batch_size: 4
+val_batch_size: 4
+num_workers: 8
+device: cuda:0
+gpu_ids: [0]
+
+# Action: keep Echo 10D for classic checkpoints; Phase 2 adds 12D RC365 adapter training
+action_dim: 10
+mode: manipulation
+
+wandb:
+  project: robocasa365_echo_vla
+  entity: null
+  name: echo_vla_rc365_pi05

@@ -1,0 +1,51 @@
+# LEO multi-task LoRA on RoboCasa365 target50 (single checkpoint)
+# Consumed by finetune_leo_target50_lora.sh -> LEO launch.py bridge
+
+task: leo_rc365_target50
+note: leo_lora_target50_pretrain
+
+# Base LEO checkpoint (align.pth or sft_noact.pth under LEO_REPO/checkpoints)
+pretrained_ckpt: align
+
+lora:
+  enable: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+train:
+  max_steps: 30000
+  global_batch_size: 32
+  lr: 3.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  save_steps: 5000
+  save_total_limit: 5
+  gradient_accumulation_steps: 1
+
+data:
+  manifest: data/manifest_target50_pretrain.jsonl
+  split: pretrain
+  task_set: target50
+  num_views: 3
+  action_dim: 12
+  use_3d: false  # v1: 2D + proprio; set true when pointcloud pipeline ready
+
+action_head:
+  hidden_dim: 1024
+  num_layers: 2
+  loss: mse
+
+eval:
+  task_set: target50
+  split: pretrain
+  n_episodes: 50
+  max_episode_steps: 720
