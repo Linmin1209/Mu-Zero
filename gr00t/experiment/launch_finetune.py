@@ -146,6 +146,13 @@ if __name__ == "__main__":
     config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
     config.model.use_component_factored_head = ft_config.use_component_factored_head
     config.model.use_visor = ft_config.use_visor
+    config.model.visor_flow_tau_split = ft_config.visor_flow_tau_split
+    config.model.visor_history_vq_tokens = ft_config.visor_history_vq_tokens
+    config.model.visor_vq_codebook_size = ft_config.visor_vq_codebook_size
+    config.model.visor_vq_commit_weight = ft_config.visor_vq_commit_weight
+    config.model.visor_use_contact_rate_prior = ft_config.visor_use_contact_rate_prior
+    config.model.visor_use_semantic_gate = ft_config.visor_use_semantic_gate
+    config.model.visor_tactile_warmup_steps = ft_config.visor_tactile_warmup_steps
     config.model.visor_loss_weight_tactile = ft_config.visor_loss_weight_tactile
     config.model.visor_contact_loss_weight = ft_config.visor_contact_loss_weight
     if ft_config.use_adaptive_component_head and ft_config.use_component_factored_head:
@@ -202,7 +209,9 @@ if __name__ == "__main__":
         )
     if ft_config.use_visor:
         print(
-            f"[i] VISOR enabled (suffix IHT + tactile aux, weight={ft_config.visor_loss_weight_tactile})"
+            f"[i] VISOR enabled (flow-late tri-path IHT, tau_split={ft_config.visor_flow_tau_split}, "
+            f"history_vq={ft_config.visor_history_vq_tokens}, "
+            f"tactile_weight={ft_config.visor_loss_weight_tactile})"
         )
     if ft_config.use_motion:
         print(

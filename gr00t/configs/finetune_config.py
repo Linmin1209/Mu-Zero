@@ -86,9 +86,23 @@ class FinetuneConfig:
     """If True, keep native AlternateVLDiT and use per-component CategorySpecificMLP decoders."""
 
     use_visor: bool = False
-    """If True, enable VISOR suffix IHT + tactile auxiliary loss (implies component-factored decode)."""
+    """If True, enable VISOR flow-late tri-path IHT + tactile auxiliary loss."""
 
-    visor_loss_weight_tactile: float = 0.5
+    visor_flow_tau_split: float = 0.4
+    """VISOR activates when flow time t >= this split (GR00T: 0=noise, 1=clean)."""
+
+    visor_history_vq_tokens: int = 2
+    """Number of VQ-discretized history tactile tokens in IHT."""
+
+    visor_vq_codebook_size: int = 64
+    visor_vq_commit_weight: float = 0.1
+
+    visor_vq_commit_weight: float = 0.1
+    visor_use_contact_rate_prior: bool = True
+    visor_use_semantic_gate: bool = True
+    visor_tactile_warmup_steps: int = 1000
+
+    visor_loss_weight_tactile: float = 0.1
     """Weight on Huber/BCE tactile auxiliary loss."""
 
     visor_contact_loss_weight: float = 1.0
