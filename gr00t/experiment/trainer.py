@@ -320,9 +320,13 @@ class Gr00tTrainer(Trainer):
             for key in (
                 "flow_loss",
                 "tactile_loss",
+                "visor_refine_active_rate",
+                "visor_coupling_lambda",
+                "visor_coupling_scale",
                 "visor_lambda_eff",
                 "visor_contact_rate",
                 "visor_force_step_rate",
+                "visor_vq_commit_loss",
             ):
                 value = _scalar_from_outputs(outputs, key)
                 if value is not None:

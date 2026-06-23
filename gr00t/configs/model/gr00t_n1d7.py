@@ -153,9 +153,21 @@ class Gr00tN1d7Config(PretrainedConfig):
 
     # VISOR: imagined haptics bridge (requires component_factored_head or use_visor path)
     use_visor: bool = False
+    visor_flow_tau_split: float = 0.4
+    """Flow-time split (GR00T: 0=noise, 1=clean). VISOR refines only when t >= split."""
+    visor_history_vq_tokens: int = 2
+    visor_vq_codebook_size: int = 64
+    visor_vq_hidden_dim: int = 64
+    visor_vq_commit_weight: float = 0.1
+    visor_use_contact_rate_prior: bool = True
+    visor_use_semantic_gate: bool = True
+    visor_gate_components: tuple[str, ...] = ("right_hand",)
+    visor_tactile_warmup_steps: int = 1000
+    visor_detach_tactile_for_gate: bool = True
     visor_iht_tokens: int = 2
+    """Legacy; tri-path IHT count is history_vq_tokens + 2 (instant + spatial)."""
     visor_hidden_dim: int = 256
-    visor_loss_weight_tactile: float = 0.5
+    visor_loss_weight_tactile: float = 0.1
     visor_contact_loss_weight: float = 1.0
     tune_visor: bool = True
 

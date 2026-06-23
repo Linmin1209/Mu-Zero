@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import torch
-from torch import nn
 import torch.nn.functional as F
 from transformers.feature_extraction_utils import BatchFeature
 
@@ -29,8 +27,19 @@ def build_visor_factored_action_head(base_cls: type):
     class VisorFactoredActionHead(ComponentFactoredActionHead):
         def __init__(self, config: Gr00tN1d7Config):
             super().__init__(config)
-            iht_tokens = int(getattr(config, "visor_iht_tokens", 2))
             proprio_dim = config.max_state_dim * config.state_history_length
+            gate_components = getattr(config, "visor_gate_components", ("right_hand",))
+            if isinstance(gate_components, list):
+                gate_components = tuple(gate_components)
+            self.visor_gate_components = frozenset(gate_components)
+            self.visor_tactile_warmup_steps = int(
+                getattr(config, "visor_tactile_warmup_steps", 1000)
+            )
+            self.visor_detach_tactile_for_gate = bool(
+                getattr(config, "visor_detach_tactile_for_gate", True)
+            )
+            self.register_buffer("_visor_train_step", torch.zeros((), dtype=torch.long), persistent=False)
+
             self.visor = VisorModule(
                 action_dim=self.action_dim,
                 hidden_dim=int(getattr(config, "visor_hidden_dim", 256)),
@@ -39,20 +48,57 @@ def build_visor_factored_action_head(base_cls: type):
                 vision_dim=config.backbone_embedding_dim,
                 proprio_dim=proprio_dim,
                 decode_hidden_dim=self.hidden_size,
-                iht_tokens=iht_tokens,
-                loss_weight_tactile=float(getattr(config, "visor_loss_weight_tactile", 0.5)),
+                flow_tau_split=float(getattr(config, "visor_flow_tau_split", 0.4)),
+                history_vq_tokens=int(getattr(config, "visor_history_vq_tokens", 2)),
+                vq_codebook_size=int(getattr(config, "visor_vq_codebook_size", 64)),
+                vq_hidden_dim=int(getattr(config, "visor_vq_hidden_dim", 64)),
+                loss_weight_tactile=float(getattr(config, "visor_loss_weight_tactile", 0.1)),
                 contact_loss_weight=float(
                     getattr(config, "visor_contact_loss_weight", 1.0)
                 ),
+                vq_commit_weight=float(getattr(config, "visor_vq_commit_weight", 0.1)),
+                use_contact_rate_prior=bool(
+                    getattr(config, "visor_use_contact_rate_prior", True)
+                ),
+                use_semantic_gate=bool(getattr(config, "visor_use_semantic_gate", True)),
+                language_dim=config.backbone_embedding_dim,
             )
             logger.info(
-                "VisorFactoredActionHead: iht_tokens=%d loss_weight=%.3f",
-                iht_tokens,
+                "VisorFactoredActionHead: tau_split=%.2f iht_tokens=%d gate_components=%s "
+                "tactile_weight=%.3f warmup=%d",
+                self.visor.flow_tau_split,
+                self.visor.iht_tokens,
+                sorted(self.visor_gate_components),
                 self.visor.loss_weight_tactile,
+                self.visor_tactile_warmup_steps,
             )
             self.set_trainable_parameters(
                 config.tune_projector, config.tune_diffusion_model, config.tune_vlln
             )
+
+        def _coupling_scale(self) -> float:
+            if not self.training or self.visor_tactile_warmup_steps <= 0:
+                return 1.0
+            step = float(self._visor_train_step.item())
+            return min(1.0, step / float(self.visor_tactile_warmup_steps))
+
+        def decode_action_hidden(
+            self,
+            hidden: torch.Tensor,
+            embodiment_id: torch.Tensor,
+            *,
+            gate_delta: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            batch_size, horizon, _ = hidden.shape
+            pred = hidden.new_zeros(batch_size, horizon, self.action_dim)
+            for seg in self.decoder_segments:
+                h_seg = hidden
+                if gate_delta is not None and seg.name in self.visor_gate_components:
+                    h_seg = hidden + gate_delta
+                pred[:, :, seg.start : seg.end] = self._decoder_for_segment(seg)(
+                    h_seg, embodiment_id
+                )
+            return pred
 
         def set_trainable_parameters(
             self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool
@@ -104,17 +150,28 @@ def build_visor_factored_action_head(base_cls: type):
                 sa_self_attention_mask=sa_self_attention_mask,
             )
 
+        def _visor_sa_mask(self, device: torch.device, dtype: torch.dtype, batch_size: int):
+            sa_mask = build_asymmetric_sa_mask(
+                self.visor.native_seq_len,
+                self.visor.iht_tokens,
+                device=device,
+                dtype=dtype,
+            )
+            return self._expand_sa_mask(sa_mask, batch_size)
+
         def forward(self, backbone_output, action_input):
             self.set_frozen_modules_to_eval_mode()
+            if self.training:
+                self._visor_train_step += 1
+            coupling_scale = self._coupling_scale()
+
             backbone_output = self.process_backbone_output(backbone_output)
             vl_embeds = backbone_output.backbone_features
             device = vl_embeds.device
             embodiment_id = action_input.embodiment_id
 
             assert action_input.state.shape[1] == self.config.state_history_length
-            proprio = action_input.state.reshape(
-                action_input.state.shape[0], -1
-            )
+            proprio = action_input.state.reshape(action_input.state.shape[0], -1)
             action_input.state = action_input.state.view(action_input.state.shape[0], 1, -1)
             state_features = self.state_encoder(action_input.state, embodiment_id)
 
@@ -145,6 +202,17 @@ def build_visor_factored_action_head(base_cls: type):
             vision_context = self.visor.pool_vision_context(
                 vl_embeds, backbone_output.image_mask
             )
+            language_context = self.visor.pool_language_context(
+                vl_embeds,
+                backbone_output.image_mask,
+                backbone_output.backbone_attention_mask,
+            )
+            tactile_gt = getattr(action_input, "tactile_gt", None)
+            coupling_lambda = self.visor.compute_coupling_lambda(
+                language_context,
+                tactile_gt=tactile_gt,
+            )
+
             tactile_pred = self.visor.wwm(
                 noisy_trajectory,
                 t,
@@ -152,31 +220,31 @@ def build_visor_factored_action_head(base_cls: type):
                 proprio,
                 use_clean_action=False,
             )
-            iht_tokens = self.visor.build_iht_tokens(tactile_pred)
-            sa_embs = torch.cat((state_features, action_features, iht_tokens), dim=1)
-            sa_mask = build_asymmetric_sa_mask(
-                self.visor.native_seq_len,
-                self.visor.iht_tokens,
-                device=device,
-                dtype=sa_embs.dtype,
+            iht_tokens, vq_commit = self.visor.build_iht_tokens(
+                tactile_pred, vision_context, flow_time=t
             )
-            sa_mask = self._expand_sa_mask(sa_mask, sa_embs.shape[0])
+            sa_embs = torch.cat((state_features, action_features, iht_tokens), dim=1)
 
             model_output, _ = self._run_dit(
                 sa_embs,
                 vl_embeds,
                 t_discretized,
                 backbone_output,
-                sa_mask,
+                self._visor_sa_mask(device, sa_embs.dtype, sa_embs.shape[0]),
                 return_all_hidden_states=True,
             )
 
             hidden_action = model_output[:, 1 : 1 + self.action_horizon]
-            event = tactile_pred.mean(dim=1)
-            hidden_action = hidden_action + self.visor.gate * self.visor.gate_proj(
-                event
-            ).unsqueeze(1)
-            pred_actions = self.decode_action_hidden(hidden_action, embodiment_id)
+            gate_delta = self.visor.build_gate_delta(
+                tactile_pred,
+                flow_time=t,
+                coupling_lambda=coupling_lambda,
+                coupling_scale=coupling_scale,
+                detach_tactile=self.visor_detach_tactile_for_gate,
+            )
+            pred_actions = self.decode_action_hidden(
+                hidden_action, embodiment_id, gate_delta=gate_delta
+            )
 
             action_mask = action_input.action_mask
             per_elem_loss = F.mse_loss(pred_actions, velocity, reduction="none")
@@ -195,8 +263,9 @@ def build_visor_factored_action_head(base_cls: type):
             loss = flow_loss
             tactile_loss = torch.zeros((), device=device, dtype=loss.dtype)
 
-            if hasattr(action_input, "tactile_gt") and action_input.tactile_gt is not None:
-                tactile_gt = action_input.tactile_gt.to(device=device, dtype=t.dtype)
+            refine_active = self.visor.refine_active(t).float().mean()
+            if tactile_gt is not None:
+                tactile_gt = tactile_gt.to(device=device, dtype=t.dtype)
                 t_clean = torch.ones_like(t)
                 tactile_pred_supervised = self.visor.wwm(
                     actions,
@@ -208,10 +277,13 @@ def build_visor_factored_action_head(base_cls: type):
                 tactile_loss, tactile_stats = self.visor.compute_tactile_loss(
                     tactile_pred_supervised,
                     tactile_gt,
+                    vq_commit_loss=vq_commit,
+                    coupling_lambda=coupling_lambda,
                 )
+                tactile_loss = tactile_loss * coupling_scale
                 loss = loss + tactile_loss
             else:
-                tactile_stats = {}
+                tactile_stats = {"vq_commit_loss": vq_commit.detach().reshape(())}
 
             return {
                 "loss": loss,
@@ -222,6 +294,9 @@ def build_visor_factored_action_head(base_cls: type):
                 "backbone_features": vl_embeds,
                 "state_features": state_features,
                 "tactile_pred": tactile_pred.detach(),
+                "visor_refine_active_rate": refine_active.detach(),
+                "visor_coupling_lambda": coupling_lambda.mean().detach(),
+                "visor_coupling_scale": torch.tensor(coupling_scale, device=device),
                 **{f"visor_{k}": v for k, v in tactile_stats.items()},
             }
 
@@ -243,8 +318,9 @@ def build_visor_factored_action_head(base_cls: type):
                 dtype=vl_embeds.dtype,
                 device=device,
             )
-            dt = 1.0 / self.num_inference_timesteps
-            vel_strength = torch.ones_like(actions)
+            num_steps = self.num_inference_timesteps
+            tau_split = self.visor.flow_tau_split
+            slow_steps = max(1, int(round((1.0 - tau_split) * num_steps)))
 
             if "action" in action_input:
                 assert options is not None
@@ -255,34 +331,21 @@ def build_visor_factored_action_head(base_cls: type):
                     - options["rtc_overlap_steps"] : action_horizon_before_padding,
                     :,
                 ]
-                vel_strength[:, : options["rtc_frozen_steps"], :] = 0.0
-                intermediate_steps = options["rtc_overlap_steps"] - options["rtc_frozen_steps"]
-                t_ramp = torch.linspace(0.0, 1.0, intermediate_steps + 2, device=device)
-                ramp = 1 - torch.exp(-options["rtc_ramp_rate"] * t_ramp)
-                ramp = ramp / ramp[-1].clamp_min(1e-8)
-                ramp = ramp[1:-1]
-                vel_strength[
-                    :,
-                    options["rtc_frozen_steps"] : options["rtc_overlap_steps"],
-                    :,
-                ] = ramp[None, :, None].to(device)
 
             vision_context = self.visor.pool_vision_context(
                 vl_embeds, backbone_output.image_mask
             )
-            proprio = action_input.state.reshape(action_input.state.shape[0], -1)
-            sa_mask = self._expand_sa_mask(
-                build_asymmetric_sa_mask(
-                    self.visor.native_seq_len,
-                    self.visor.iht_tokens,
-                    device=device,
-                    dtype=vl_embeds.dtype,
-                ),
-                batch_size,
+            language_context = self.visor.pool_language_context(
+                vl_embeds,
+                backbone_output.image_mask,
+                backbone_output.backbone_attention_mask,
             )
+            proprio = action_input.state.reshape(action_input.state.shape[0], -1)
+            sa_mask = self._visor_sa_mask(device, vl_embeds.dtype, batch_size)
 
-            for step in range(self.num_inference_timesteps):
-                t_cont = step / float(self.num_inference_timesteps)
+            def _euler_step(step_idx: int, *, use_visor: bool) -> None:
+                nonlocal actions
+                t_cont = step_idx / float(num_steps)
                 t_discretized = int(t_cont * self.num_timestep_buckets)
                 timesteps_tensor = torch.full(
                     size=(batch_size,), fill_value=t_discretized, device=device
@@ -298,31 +361,52 @@ def build_visor_factored_action_head(base_cls: type):
                     pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
                     action_features = action_features + pos_embs
 
-                tactile_pred = self.visor.wwm(
-                    actions,
-                    t_broadcast,
-                    vision_context,
-                    proprio,
-                    use_clean_action=False,
-                )
-                iht_tokens = self.visor.build_iht_tokens(tactile_pred)
-                sa_embs = torch.cat((state_features, action_features, iht_tokens), dim=1)
+                gate_delta = None
+                if use_visor:
+                    tactile_pred = self.visor.wwm(
+                        actions,
+                        t_broadcast,
+                        vision_context,
+                        proprio,
+                        use_clean_action=False,
+                    )
+                    coupling_lambda = self.visor.compute_coupling_lambda(
+                        language_context,
+                        tactile_pred=tactile_pred,
+                    )
+                    iht_tokens, _ = self.visor.build_iht_tokens(
+                        tactile_pred, vision_context, flow_time=t_broadcast
+                    )
+                    sa_embs = torch.cat((state_features, action_features, iht_tokens), dim=1)
+                    gate_delta = self.visor.build_gate_delta(
+                        tactile_pred,
+                        flow_time=t_broadcast,
+                        coupling_lambda=coupling_lambda,
+                        coupling_scale=1.0,
+                        detach_tactile=self.visor_detach_tactile_for_gate,
+                    )
+                else:
+                    sa_embs = torch.cat((state_features, action_features), dim=1)
 
                 model_output = self._run_dit(
                     sa_embs,
                     vl_embeds,
                     timesteps_tensor,
                     backbone_output,
-                    sa_mask,
+                    sa_mask if use_visor else None,
                     return_all_hidden_states=False,
                 )
                 hidden_action = model_output[:, 1 : 1 + self.action_horizon]
-                event = tactile_pred.mean(dim=1)
-                hidden_action = hidden_action + self.visor.gate * self.visor.gate_proj(
-                    event
-                ).unsqueeze(1)
-                pred_velocity = self.decode_action_hidden(hidden_action, embodiment_id)
-                actions = actions + dt * pred_velocity * vel_strength
+                pred_velocity = self.decode_action_hidden(
+                    hidden_action, embodiment_id, gate_delta=gate_delta
+                )
+                dt = 1.0 / num_steps
+                actions = actions + dt * pred_velocity
+
+            for step in range(slow_steps):
+                _euler_step(step, use_visor=False)
+            for step in range(slow_steps, num_steps):
+                _euler_step(step, use_visor=True)
 
             return BatchFeature(
                 data={
