@@ -322,6 +322,12 @@ Then run the TRT pipeline or PyTorch inference as shown in the [TensorRT Acceler
 The activation script exports the PyTorch and CUDA library/include paths that `torchcodec`
 and `torch.compile` need on Thor.
 </details>
+> ⚠️ **aarch64 users (Thor):** After running `install_deps.sh`, always
+> activate the venv with `source .venv/bin/activate && source scripts/activate_thor.sh`
+> and invoke training with **plain `python`**, not `uv run python`. The latter will
+> re-sync against the root `pyproject.toml` (which targets x86_64 Python 3.10) and
+> destroy the platform-specific environment.
+
 
 ---
 
@@ -390,6 +396,12 @@ Then run the TRT pipeline or PyTorch inference as shown in the [TensorRT Acceler
 If you later rerun `uv sync`, rerun `bash scripts/deployment/spark/install_deps.sh` so the
 Spark-specific `flash-attn` build is restored and revalidated.
 </details>
+> ⚠️ **aarch64 users (Spark):** After running `install_deps.sh`, always
+> activate the venv with `source .venv/bin/activate && source scripts/activate_spark.sh`
+> and invoke training with **plain `python`**, not `uv run python`. The latter will
+> re-sync against the root `pyproject.toml` (which targets x86_64 Python 3.10) and
+> destroy the platform-specific environment.
+
 
 ---
 
@@ -461,6 +473,12 @@ Then run the TRT pipeline (with `--export-mode dit_only`) or PyTorch inference a
 The activation script exports the PyTorch and CUDA library/include paths that `torchcodec`
 and `torch.compile` need on Orin.
 </details>
+> ⚠️ **aarch64 users (Orin):** After running `install_deps.sh`, always
+> activate the venv with `source .venv/bin/activate && source scripts/activate_orin.sh`
+> and invoke training with **plain `python`**, not `uv run python`. The latter will
+> re-sync against the root `pyproject.toml` (which targets x86_64 Python 3.10) and
+> destroy the platform-specific environment.
+
 
 > **Orin storage tip:** If your eMMC root is low on space, redirect the HuggingFace cache to an NVMe SSD with `export HF_HOME=/path/to/ssd/.cache/huggingface` before downloading models.
 
@@ -496,7 +514,6 @@ and `torch.compile` need on Orin.
 | `--precision` | `bf16` | Precision for ONNX export and TRT engine build (`bf16`, `fp16`, `fp32`) |
 | `--batch-size` | `1` | Batch size baked into exported ONNX/TRT models (static — see note below) |
 | `--export-mode` | `full_pipeline` | Export mode: `dit_only`, `action_head`, or `full_pipeline` |
-| `--video-backend` | `torchcodec` | Video backend for dataset loading |
 | `--workspace` | `8192` | TRT builder workspace size in MB |
 | `--num-iterations` | `20` | Number of benchmark iterations |
 | `--warmup` | `5` | Number of warmup iterations |
@@ -518,7 +535,6 @@ and `torch.compile` need on Orin.
 | `--trt-engine-path` | `./gr00t_n1d7_engines` | Directory containing pre-built TRT engines |
 | `--denoising-steps` | `4` | Diffusion denoising iterations |
 | `--save-plot-path` | `None` | Save per-trajectory GT-vs-predicted comparison plots |
-| `--video-backend` | `torchcodec` | Video decoder: `torchcodec`, `decord`, or `torchvision_av` |
 | `--skip-timing-steps` | `1` | Initial steps excluded from timing stats (warmup) |
 | `--host` / `--port` | `127.0.0.1` / `5555` | Server address (when using client mode without `--model-path`) |
 | `--seed` | `42` | Random seed for reproducibility |

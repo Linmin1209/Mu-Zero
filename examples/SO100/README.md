@@ -56,6 +56,8 @@ The evaluation produces visualizations comparing predicted actions against groun
 
 <img src="../../media/open_loop_eval_so100.jpg" width="800" alt="Open-loop evaluation results showing predicted vs ground truth trajectories" />
 
+To read these numbers and decide whether your fine-tune is working, see [Interpreting the Result: Is My Fine-tune Working?](../../getting_started/finetune_new_embodiment.md#interpreting-the-result-is-my-fine-tune-working).
+
 ## Closed-Loop Evaluation
 
 Please refer to [eval_so100.py](../../gr00t/eval/real_robot/SO100/eval_so100.py) for how to write SO100 deployment code using Policy API.
@@ -70,16 +72,16 @@ uv pip install -e . --verbose
 uv pip install --no-deps -e ../../../../
 ```
 
-2. Start policy server
+2. Start policy server from the repository root in a separate terminal:
 ```bash
 uv run python gr00t/eval/run_gr00t_server.py \
   --model-path /tmp/so100_finetune/checkpoint-10000 \
   --embodiment-tag NEW_EMBODIMENT 
 ```
 
-3. Run the eval script, as client.
+3. Run the eval script as the client from the `gr00t/eval/real_robot/SO100` environment created above:
 ```bash
-uv run python gr00t/eval/real_robot/SO100/eval_so100.py \
+uv run python eval_so100.py \
   --robot.type=so101_follower --robot.port=/dev/ttyACM2 \
   --robot.id=orange_follower \
   --robot.cameras="{ wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}, front: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30}}" \

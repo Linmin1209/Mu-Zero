@@ -36,6 +36,13 @@ from tqdm import tqdm
 import tyro
 
 
+ROBOCASA_PANDA_RECORD_VIDEO_KEYS = (
+    "video.res256_image_side_0",
+    "video.res256_image_side_1",
+    "video.res256_image_wrist_0",
+)
+
+
 class TrtMode(str, Enum):
     """TensorRT inference modes."""
 
@@ -54,10 +61,6 @@ class VideoConfig:
             during rollout
         fps: Frames per second for the output video
         codec: Video codec to use for compression
-        input_pix_fmt: Input pixel format
-        crf: Constant Rate Factor for video compression (lower = better quality)
-        thread_type: Threading strategy for video encoding
-        thread_count: Number of threads to use for encoding
     """
 
     video_dir: str | None = None
@@ -65,12 +68,9 @@ class VideoConfig:
     max_episode_steps: int = 720
     fps: int = 20
     codec: str = "h264"
-    input_pix_fmt: str = "rgb24"
-    crf: int = 22
-    thread_type: str = "FRAME"
-    thread_count: int = 1
     overlay_text: bool = True
     n_action_steps: int = 8
+    record_video_keys: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -151,8 +151,11 @@ def get_robocasa_env_fn(
     env_name: str,
 ):
     def env_fn():
-        import robocasa  # noqa: F401
-        import robocasa.utils.gym_utils.gymnasium_groot  # noqa: F401
+        if env_name.startswith("robocasa365_panda_omron/"):
+            import gr00t.eval.sim.robocasa365.gymnasium_groot  # noqa: F401
+        else:
+            import robocasa  # noqa: F401
+            import robocasa.utils.gym_utils.gymnasium_groot  # noqa: F401
 
         return gym.make(env_name, enable_render=True)
 
@@ -175,7 +178,7 @@ def get_gym_env(
         env_fn = get_robocasa365_env_fn(
             env_name, seed=seed + env_idx, robocasa_split=robocasa_split
         )
-    elif env_prefix in ("robocasa_panda_omron", "gr1_unified"):
+    elif env_prefix in ("robocasa_panda_omron", "robocasa365_panda_omron", "gr1_unified"):
         env_fn = get_robocasa_env_fn(env_name)
 
     elif env_embodiment in (EmbodimentTag.SIMPLER_ENV_GOOGLE, EmbodimentTag.SIMPLER_ENV_WIDOWX):
@@ -209,26 +212,24 @@ def create_eval_env(
         env_name, env_idx, total_n_envs, seed=seed, robocasa_split=robocasa_split
     )
     if wrapper_configs.video.video_dir is not None:
-        from gr00t.eval.sim.wrapper.video_recording_wrapper import (
-            VideoRecorder,
-            VideoRecordingWrapper,
-        )
+        from gr00t.eval.sim.wrapper.video_recording_wrapper import VideoRecordingWrapper
 
-        video_recorder = VideoRecorder.create_h264(
-            fps=wrapper_configs.video.fps,
-            codec=wrapper_configs.video.codec,
-            input_pix_fmt=wrapper_configs.video.input_pix_fmt,
-            crf=wrapper_configs.video.crf,
-            thread_type=wrapper_configs.video.thread_type,
-            thread_count=wrapper_configs.video.thread_count,
-        )
+        record_video_keys = wrapper_configs.video.record_video_keys
+        if record_video_keys is None and env_name.split("/")[0] in (
+            "robocasa_panda_omron",
+            "robocasa365_panda_omron",
+        ):
+            record_video_keys = ROBOCASA_PANDA_RECORD_VIDEO_KEYS
+
         env = VideoRecordingWrapper(
             env,
-            video_recorder,
             video_dir=Path(wrapper_configs.video.video_dir),
             steps_per_render=wrapper_configs.video.steps_per_render,
             max_episode_steps=wrapper_configs.video.max_episode_steps,
+            fps=wrapper_configs.video.fps,
+            codec=wrapper_configs.video.codec,
             overlay_text=wrapper_configs.video.overlay_text,
+            record_video_keys=record_video_keys,
         )
 
     env = MultiStepWrapper(

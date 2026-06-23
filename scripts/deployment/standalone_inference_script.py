@@ -29,7 +29,6 @@ import warnings
 from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
 from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
 from gr00t.data.embodiment_tags import EmbodimentTag
-from gr00t.deployment.modes import VideoBackend
 from gr00t.policy.gr00t_policy import Gr00tPolicy
 from gr00t.policy.policy import BasePolicy
 from matplotlib import pyplot as plt
@@ -600,9 +599,6 @@ class ArgsConfig:
     action_horizon: int = 16
     """Action horizon to evaluate."""
 
-    video_backend: VideoBackend = "torchcodec"
-    """Video backend to use for various codec options. h264: decord or av: torchvision_av"""
-
     dataset_path: str = "demo_data/droid_sample"
     """Path to the dataset."""
 
@@ -720,8 +716,6 @@ def main(args: ArgsConfig):
     dataset = LeRobotEpisodeLoader(
         dataset_path=args.dataset_path,
         modality_configs=modality,
-        video_backend=args.video_backend,
-        video_backend_kwargs=None,
     )
 
     dataset_load_time = time.time() - dataset_load_start

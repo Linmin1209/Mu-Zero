@@ -38,7 +38,6 @@ from typing import Any, Optional
 import torch
 from transformers.trainer import TRAINER_STATE_NAME, Trainer, TrainerState, get_last_checkpoint
 from transformers.trainer_callback import TrainerCallback
-from transformers.trainer_utils import EvalPrediction
 
 
 class ProfCallback(TrainerCallback):
@@ -150,46 +149,6 @@ def _batch_accuracy(
     return accuracy
 
 
-# Global variables for batched evaluation metrics
-_eval_accuracy_accumulated_correct = 0
-_eval_accuracy_accumulated_total = 0
-
-
-def compute_eval_accuracy(
-    eval_pred: EvalPrediction, compute_result: bool, action_offset: Optional[int] = None
-):
-    logits = eval_pred.predictions[0]
-    if action_offset is not None:
-        logits = logits[..., action_offset:]
-    preds = logits.argmax(axis=-1)
-    labels = eval_pred.label_ids
-
-    preds = preds[:, :-1]
-    labels = labels[:, 1:]
-
-    # Ignore positions with label == -100 (HF convention)
-    mask = labels != -100
-
-    if action_offset is not None:
-        # we offset the labels to the action tokens range, with normal tokens in the negatives
-        labels = labels - action_offset
-
-    correct = ((preds == labels) & mask).sum()
-    total = mask.sum()
-
-    global _eval_accuracy_accumulated_correct, _eval_accuracy_accumulated_total
-    _eval_accuracy_accumulated_correct += correct
-    _eval_accuracy_accumulated_total += total
-
-    if compute_result:
-        accuracy = _eval_accuracy_accumulated_correct / max(_eval_accuracy_accumulated_total, 1)
-        _eval_accuracy_accumulated_correct = 0
-        _eval_accuracy_accumulated_total = 0
-        return {"eval_accuracy": accuracy}
-    else:
-        return {}
-
-
 def _scalar_from_outputs(outputs: Any, key: str) -> float | None:
     if outputs is None:
         return None
@@ -230,11 +189,7 @@ class Gr00tTrainer(Trainer):
         """
         self.action_offset = kwargs.pop("action_offset", None)
         self.multiprocessing_context = kwargs.pop("multiprocessing_context", "fork")
-        super().__init__(
-            *args,
-            **kwargs,
-            # compute_metrics=partial(compute_eval_accuracy, action_offset=self.action_offset),
-        )
+        super().__init__(*args, **kwargs)
 
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         # Hide epoch from logged metrics as it's misleading for Iterable datasets.
@@ -295,25 +250,30 @@ class Gr00tTrainer(Trainer):
         resume_from_checkpoint=None,
         **kwargs,
     ):
-        """Correctly set self.state from checkpoint so get_train_dataloader can read from it."""
-        if resume_from_checkpoint is False:
-            resume_from_checkpoint = None
-
-        if isinstance(resume_from_checkpoint, bool) and resume_from_checkpoint:
-            resume_from_checkpoint = get_last_checkpoint(self.args.output_dir)
-            if resume_from_checkpoint is None:
-                logging.warning(
+        """Pre-load TrainerState before super().train() so get_train_dataloader
+        can read self.state.global_step (stateful samplers rely on this).
+        ``resume_from_checkpoint=True`` with no checkpoint raises rather than
+        silently starting fresh.
+        """
+        if resume_from_checkpoint is True:
+            latest_checkpoint = get_last_checkpoint(self.args.output_dir)
+            if latest_checkpoint is None:
+                raise ValueError(
                     f"No valid checkpoint found in output directory ({self.args.output_dir})"
                 )
+        elif resume_from_checkpoint in (False, None):
+            latest_checkpoint = None
+        else:
+            latest_checkpoint = resume_from_checkpoint  # caller passed an explicit path
 
-        if resume_from_checkpoint is not None:
-            logging.info(f"Resuming from checkpoint {resume_from_checkpoint}")
+        if latest_checkpoint is not None:
+            logging.info(f"Resuming from checkpoint {latest_checkpoint}")
             # In case of repeating the find_executable_batch_size, set `self._train_batch_size` properly
             self.state = TrainerState.load_from_json(
-                os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
+                os.path.join(latest_checkpoint, TRAINER_STATE_NAME)
             )
 
-        return super().train(resume_from_checkpoint=resume_from_checkpoint, **kwargs)
+        return super().train(resume_from_checkpoint=latest_checkpoint, **kwargs)
 
     # ------------------------------------------------------------------
     # Loss / accuracy computation override
