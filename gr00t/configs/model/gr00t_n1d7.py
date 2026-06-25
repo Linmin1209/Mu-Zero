@@ -153,6 +153,10 @@ class Gr00tN1d7Config(PretrainedConfig):
 
     # VISOR: imagined haptics bridge (requires component_factored_head or use_visor path)
     use_visor: bool = False
+    visor_tactile_mode: str = "imagine"
+    """imagine: WWM-predicted tactile; sensor: dataset/sensor tactile; hybrid: sensor if present else WWM."""
+    visor_train_wwm: bool = True
+    """Train WWM auxiliary tactile loss on tactile_gt (tactile_future chunk)."""
     visor_flow_tau_split: float = 0.4
     """Flow-time split (GR00T: 0=noise, 1=clean). VISOR refines only when t >= split."""
     visor_history_vq_tokens: int = 2

@@ -317,6 +317,7 @@ fi
 echo "$SERVER_PORT" > "$RUN_DIR/server_port.txt"
 
 # Ensure finetuned RoboCasa365 modality keys are registered before server load.
+"$GR00T_PYTHON" -c "import examples.RoboCasa365.robocasa365_config_4frame  # noqa: F401" 2>/dev/null || \
 "$GR00T_PYTHON" -c "import examples.RoboCasa365.robocasa365_config  # noqa: F401" 2>/dev/null || true
 
 "$GR00T_PYTHON" -u gr00t/eval/run_gr00t_server.py \

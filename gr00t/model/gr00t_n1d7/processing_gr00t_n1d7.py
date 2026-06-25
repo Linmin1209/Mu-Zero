@@ -815,25 +815,53 @@ class Gr00tN1d7Processor(BaseProcessor):
                 transformed_inputs["action_mask"] = action_mask
 
         tactile_cfg = self.modality_configs.get(embodiment_tag.value, {}).get("tactile")
-        if tactile_cfg is not None and content.metadata.get("tactile"):
-            td = content.metadata["tactile"]
+        tactile_future_cfg = self.modality_configs.get(embodiment_tag.value, {}).get(
+            "tactile_future"
+        )
+
+        def _stack_tactile(td: dict, modality_keys: list[str]) -> np.ndarray:
             parts = []
-            for key in tactile_cfg.modality_keys:
+            for key in modality_keys:
                 arr = np.asarray(td[key], dtype=np.float32)
                 if arr.ndim == 1:
                     arr = arr[:, None]
                 parts.append(arr)
-            tactile_gt = np.concatenate(parts, axis=-1)
-            horizon = tactile_gt.shape[0]
-            if horizon < self.max_action_horizon:
+            return np.concatenate(parts, axis=-1)
+
+        if tactile_cfg is not None and content.metadata.get("tactile"):
+            tactile_arr = _stack_tactile(content.metadata["tactile"], tactile_cfg.modality_keys)
+            tactile_deltas = tactile_cfg.delta_indices
+            is_history_aligned = len(tactile_deltas) > 0 and max(tactile_deltas) <= 0
+            if is_history_aligned:
+                transformed_inputs["tactile_sensor"] = torch.from_numpy(tactile_arr).to(
+                    torch.float32
+                )
+            else:
+                # Legacy: tactile modality carries the full future chunk (0..H-1).
+                if tactile_arr.shape[0] < self.max_action_horizon:
+                    pad = np.zeros(
+                        (self.max_action_horizon - tactile_arr.shape[0], tactile_arr.shape[1]),
+                        dtype=np.float32,
+                    )
+                    tactile_arr = np.concatenate([tactile_arr, pad], axis=0)
+                elif tactile_arr.shape[0] > self.max_action_horizon:
+                    tactile_arr = tactile_arr[: self.max_action_horizon]
+                transformed_inputs["tactile_gt"] = torch.from_numpy(tactile_arr).to(torch.float32)
+                transformed_inputs["tactile_sensor"] = transformed_inputs["tactile_gt"]
+
+        if tactile_future_cfg is not None and content.metadata.get("tactile_future"):
+            tactile_future = _stack_tactile(
+                content.metadata["tactile_future"], tactile_future_cfg.modality_keys
+            )
+            if tactile_future.shape[0] < self.max_action_horizon:
                 pad = np.zeros(
-                    (self.max_action_horizon - horizon, tactile_gt.shape[1]),
+                    (self.max_action_horizon - tactile_future.shape[0], tactile_future.shape[1]),
                     dtype=np.float32,
                 )
-                tactile_gt = np.concatenate([tactile_gt, pad], axis=0)
-            elif horizon > self.max_action_horizon:
-                tactile_gt = tactile_gt[: self.max_action_horizon]
-            transformed_inputs["tactile_gt"] = torch.from_numpy(tactile_gt).to(torch.float32)
+                tactile_future = np.concatenate([tactile_future, pad], axis=0)
+            elif tactile_future.shape[0] > self.max_action_horizon:
+                tactile_future = tactile_future[: self.max_action_horizon]
+            transformed_inputs["tactile_gt"] = torch.from_numpy(tactile_future).to(torch.float32)
         # Add VLM inputs
         transformed_inputs.update(vlm_inputs)
         transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]

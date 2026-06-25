@@ -36,7 +36,7 @@ echo "[i] base model: $GR00T_BASE_MODEL"
 echo "[i] Task: $ROBOCASA365_TASKS"
 echo "[i] Split/category: $ROBOCASA365_SPLIT / $ROBOCASA365_CATEGORY"
 echo "[i] modality config: $MODALITY_CONFIG (video delta [-6,-4,-2,0], tactile horizon 40)"
-echo "[i] use_component_factored_head=True use_visor=True"
+echo "[i] use_component_factored_head=True use_visor=True visor_tactile_mode=$VISOR_TACTILE_MODE"
 echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION"
 echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
 echo "[i] output: $OUTPUT_DIR"
@@ -44,6 +44,10 @@ echo "[i] log: $LOG_FILE"
 
 EXTRA=(--robocasa365-tasks "$ROBOCASA365_TASKS")
 VISOR_ARGS=(--use-component-factored-head --use-visor)
+VISOR_TACTILE_MODE="${VISOR_TACTILE_MODE:-sensor}"
+if [[ -n "$VISOR_TACTILE_MODE" ]]; then
+  VISOR_ARGS+=(--visor-tactile-mode "$VISOR_TACTILE_MODE")
+fi
 MOTION_ARGS=()
 if [[ "$USE_MOTION" == "1" ]]; then
   MOTION_ARGS+=(--use-motion --motion-insert-layer "$MOTION_INSERT_LAYER")

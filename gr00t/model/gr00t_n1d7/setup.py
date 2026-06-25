@@ -197,6 +197,8 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 "use_adaptive_component_head",
                 "use_component_factored_head",
                 "use_visor",
+                "visor_tactile_mode",
+                "visor_train_wwm",
                 "visor_flow_tau_split",
                 "visor_history_vq_tokens",
                 "visor_vq_codebook_size",

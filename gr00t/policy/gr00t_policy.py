@@ -213,6 +213,8 @@ class Gr00tPolicy(BasePolicy):
                 "state": {k: v[i] for k, v in value["state"].items()},
                 "language": {k: v[i] for k, v in value["language"].items()},
             }
+            if "tactile" in value:
+                unbatched_value["tactile"] = {k: v[i] for k, v in value["tactile"].items()}
             unbatched_obs.append(unbatched_value)
         return unbatched_obs
 
@@ -231,6 +233,7 @@ class Gr00tPolicy(BasePolicy):
             actions={},  # No ground truth actions during inference
             text=observation["language"][self.language_key][0],
             embodiment=self.embodiment_tag,
+            metadata={"tactile": observation["tactile"]} if "tactile" in observation else {},
         )
 
     def check_observation(self, observation: dict[str, Any]) -> None:
@@ -349,6 +352,35 @@ class Gr00tPolicy(BasePolicy):
             assert batched_state.shape[1] == len(self.modality_configs["state"].delta_indices), (
                 f"State key '{state_key}'s horizon must be {len(self.modality_configs['state'].delta_indices)}. Got {batched_state.shape[1]}"
             )
+
+        tactile_cfg = self.modality_configs.get("tactile")
+        if tactile_cfg is not None:
+            assert "tactile" in observation, (
+                "Observation must contain 'tactile' when modality config defines tactile keys"
+            )
+            for tactile_key in tactile_cfg.modality_keys:
+                assert tactile_key in observation["tactile"], (
+                    f"Tactile key '{tactile_key}' must be in observation"
+                )
+                if bs == -1:
+                    bs = len(observation["tactile"][tactile_key])
+                else:
+                    assert len(observation["tactile"][tactile_key]) == bs, (
+                        f"Tactile key '{tactile_key}' must have batch size {bs}"
+                    )
+                batched_tactile = observation["tactile"][tactile_key]
+                assert isinstance(batched_tactile, np.ndarray), (
+                    f"Tactile key '{tactile_key}' must be a numpy array"
+                )
+                assert batched_tactile.dtype == np.float32, (
+                    f"Tactile key '{tactile_key}' must be float32"
+                )
+                assert batched_tactile.ndim == 3, (
+                    f"Tactile key '{tactile_key}' must be (B, T, D)"
+                )
+                assert batched_tactile.shape[1] == len(tactile_cfg.delta_indices), (
+                    f"Tactile key '{tactile_key}' horizon must be {len(tactile_cfg.delta_indices)}"
+                )
 
         # ===== LANGUAGE VALIDATION =====
         # Validate each language stream defined in the modality config
@@ -676,6 +708,27 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
                 f"State key '{state_key}'s horizon must be {len(modality_configs['state'].delta_indices)}. Got {batched_state.shape[1]}"
             )
 
+        # ===== TACTILE VALIDATION =====
+        tactile_cfg = modality_configs.get("tactile")
+        if tactile_cfg is not None:
+            for tactile_key in tactile_cfg.modality_keys:
+                parsed_key = f"tactile.{tactile_key}"
+                assert parsed_key in observation, f"Tactile key '{parsed_key}' must be in observation"
+
+                batched_tactile = observation[parsed_key]
+                assert isinstance(batched_tactile, np.ndarray), (
+                    f"Tactile key '{tactile_key}' must be a numpy array"
+                )
+                assert batched_tactile.dtype == np.float32, (
+                    f"Tactile key '{tactile_key}' must be float32"
+                )
+                assert batched_tactile.ndim == 3, (
+                    f"Tactile key '{tactile_key}' must be (B, T, D), got {batched_tactile.shape}"
+                )
+                assert batched_tactile.shape[1] == len(tactile_cfg.delta_indices), (
+                    f"Tactile key '{tactile_key}' horizon must be {len(tactile_cfg.delta_indices)}"
+                )
+
         # ===== LANGUAGE VALIDATION =====
         # Check language modalities (special handling for DC environment compatibility)
         for language_key in modality_configs["language"].modality_keys:
@@ -753,6 +806,12 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
                 else:
                     # Video and state arrays are already in correct format (B, T, ...)
                     new_obs[modality][key] = arr
+
+        tactile_cfg = self.policy.modality_configs.get("tactile")
+        if tactile_cfg is not None:
+            new_obs["tactile"] = {}
+            for key in tactile_cfg.modality_keys:
+                new_obs["tactile"][key] = observation[f"tactile.{key}"]
 
         # Compute actions using the underlying Gr00tPolicy
         action, info = self.policy.get_action(new_obs, options)

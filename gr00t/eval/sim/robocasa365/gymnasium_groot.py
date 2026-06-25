@@ -38,6 +38,11 @@ from robosuite.controllers.composite.composite_controller import HybridMobileBas
 from robosuite.environments.base import REGISTERED_ENVS
 
 
+from gr00t.eval.sim.robocasa365.tactile_from_sim import (
+    TACTILE_OBS_KEYS,
+    extract_gripper_tactile_frame,
+)
+
 ALLOWED_LANGUAGE_CHARSET = (
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ,.\n\t[]{}()!?'_:"
 )
@@ -126,12 +131,14 @@ class GrootRoboCasa365Env(Env):
         self,
         env_name: str,
         enable_render: bool = True,
+        enable_tactile: bool = True,
         split: str = DEFAULT_SPLIT,
         obj_registries: tuple[str, ...] | list[str] | None = DEFAULT_OBJ_REGISTRIES,
         **kwargs: Any,
     ):
         self.env_name = env_name
         self.enable_render = enable_render
+        self.enable_tactile = enable_tactile
         if obj_registries is not None:
             kwargs = {**kwargs, "obj_registries": tuple(obj_registries)}
         self.env = create_env(
@@ -182,6 +189,11 @@ class GrootRoboCasa365Env(Env):
         observation_space["annotation.human.action.task_description"] = spaces.Text(
             max_length=256, charset=ALLOWED_LANGUAGE_CHARSET
         )
+        if self.enable_tactile:
+            for key in TACTILE_OBS_KEYS:
+                observation_space[key] = spaces.Box(
+                    low=0.0, high=100.0, shape=(1,), dtype=np.float32
+                )
         self.observation_space = observation_space
 
         self.action_space = spaces.Dict(
@@ -226,6 +238,10 @@ class GrootRoboCasa365Env(Env):
             obs[mapped_name] = image
             obs[mapped_name.replace("256", "512")] = np.copy(basic_obs[f"{camera_name}_image"])
         obs["annotation.human.action.task_description"] = basic_obs["language"]
+        if self.enable_tactile:
+            tactile = extract_gripper_tactile_frame(self.env).as_obs_arrays()
+            for key in TACTILE_OBS_KEYS:
+                obs[key] = tactile[key]
         return obs
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):

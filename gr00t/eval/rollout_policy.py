@@ -28,7 +28,7 @@ import uuid
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.eval.sim.env_utils import get_embodiment_tag_from_env_name
 from gr00t.eval.sim.wrapper.multistep_wrapper import MultiStepWrapper
-from gr00t.policy import BasePolicy
+from gr00t.policy.policy import BasePolicy
 from gr00t.utils.determinism import seed_everything
 import gymnasium as gym
 import numpy as np
@@ -86,6 +86,7 @@ class MultiStepConfig:
 
     video_delta_indices: np.ndarray = field(default_factory=lambda: np.array([0]))
     state_delta_indices: np.ndarray = field(default_factory=lambda: np.array([0]))
+    tactile_delta_indices: np.ndarray | None = None
     n_action_steps: int = 16
     max_episode_steps: int = 720
     terminate_on_success: bool = False
@@ -211,6 +212,10 @@ def create_eval_env(
     env = get_gym_env(
         env_name, env_idx, total_n_envs, seed=seed, robocasa_split=robocasa_split
     )
+    if wrapper_configs.multistep.tactile_delta_indices is not None:
+        from gr00t.eval.sim.wrapper.tactile_observation_wrapper import TactileObservationWrapper
+
+        env = TactileObservationWrapper(env)
     if wrapper_configs.video.video_dir is not None:
         from gr00t.eval.sim.wrapper.video_recording_wrapper import VideoRecordingWrapper
 
@@ -236,6 +241,7 @@ def create_eval_env(
         env,
         video_delta_indices=wrapper_configs.multistep.video_delta_indices,
         state_delta_indices=wrapper_configs.multistep.state_delta_indices,
+        tactile_delta_indices=wrapper_configs.multistep.tactile_delta_indices,
         n_action_steps=wrapper_configs.multistep.n_action_steps,
         max_episode_steps=wrapper_configs.multistep.max_episode_steps,
         terminate_on_success=wrapper_configs.multistep.terminate_on_success,
@@ -459,8 +465,8 @@ def run_rollout_gymnasium_policy(
     return env_name, episode_successes, episode_infos
 
 
-def _video_delta_indices_from_checkpoint(
-    model_path: str, embodiment_tag: EmbodimentTag
+def _delta_indices_from_checkpoint(
+    model_path: str, embodiment_tag: EmbodimentTag, modality: str
 ) -> np.ndarray | None:
     if not model_path:
         return None
@@ -473,10 +479,16 @@ def _video_delta_indices_from_checkpoint(
     tag = embodiment_tag.value
     if tag not in modality_configs:
         return None
-    deltas = modality_configs[tag].get("video", {}).get("delta_indices")
+    deltas = modality_configs[tag].get(modality, {}).get("delta_indices")
     if deltas is None:
         return None
     return np.array(deltas, dtype=np.int64)
+
+
+def _video_delta_indices_from_checkpoint(
+    model_path: str, embodiment_tag: EmbodimentTag
+) -> np.ndarray | None:
+    return _delta_indices_from_checkpoint(model_path, embodiment_tag, "video")
 
 
 def create_gr00t_sim_policy(
@@ -547,15 +559,19 @@ def run_gr00t_sim_policy(
             video_dir = f"/tmp/sim_eval_videos_{env_name}_ac{n_action_steps}_{uuid.uuid4()}"
 
     video_delta_indices = np.array([0])
+    tactile_delta_indices: np.ndarray | None = None
     checkpoint_path = Path(model_path).resolve() if model_path else None
-    loaded_deltas = (
-        _video_delta_indices_from_checkpoint(str(checkpoint_path), embodiment_tag)
-        if checkpoint_path is not None
-        else None
-    )
-    if loaded_deltas is not None:
-        video_delta_indices = loaded_deltas
-        print(f"[i] video_delta_indices from checkpoint: {video_delta_indices.tolist()}")
+    if checkpoint_path is not None:
+        loaded_video = _video_delta_indices_from_checkpoint(str(checkpoint_path), embodiment_tag)
+        if loaded_video is not None:
+            video_delta_indices = loaded_video
+            print(f"[i] video_delta_indices from checkpoint: {video_delta_indices.tolist()}")
+        loaded_tactile = _delta_indices_from_checkpoint(
+            str(checkpoint_path), embodiment_tag, "tactile"
+        )
+        if loaded_tactile is not None:
+            tactile_delta_indices = loaded_tactile
+            print(f"[i] tactile_delta_indices from checkpoint: {tactile_delta_indices.tolist()}")
 
     wrapper_configs = WrapperConfigs(
         video=VideoConfig(
@@ -567,6 +583,7 @@ def run_gr00t_sim_policy(
             max_episode_steps=max_episode_steps,
             terminate_on_success=True,
             video_delta_indices=video_delta_indices,
+            tactile_delta_indices=tactile_delta_indices,
         ),
     )
 

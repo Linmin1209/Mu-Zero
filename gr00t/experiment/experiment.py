@@ -247,6 +247,12 @@ def run(config: Config):
     else:
         per_device_train_batch_size = config.training.per_gpu_batch_size
 
+    import torch
+
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
+        config.training.tf32 = False
+        logging.info("GPU compute capability < 8.0 (e.g. V100): disabled tf32")
+
     # Create training arguments
     training_args = TrainingArguments(
         output_dir=str(output_dir),

@@ -6,6 +6,33 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+VALID_VISOR_TACTILE_MODES = frozenset({"imagine", "sensor", "hybrid"})
+
+
+def normalize_visor_tactile_mode(mode: str) -> str:
+    normalized = str(mode).strip().lower()
+    if normalized not in VALID_VISOR_TACTILE_MODES:
+        raise ValueError(
+            f"visor_tactile_mode must be one of {sorted(VALID_VISOR_TACTILE_MODES)}, got {mode!r}"
+        )
+    return normalized
+
+
+def align_tactile_horizon(tactile: torch.Tensor, horizon: int) -> torch.Tensor:
+    """Pad or truncate tactile (B, T, C) to action horizon."""
+    if tactile.shape[1] == horizon:
+        return tactile
+    if tactile.shape[1] > horizon:
+        return tactile[:, :horizon]
+    pad = torch.zeros(
+        tactile.shape[0],
+        horizon - tactile.shape[1],
+        tactile.shape[2],
+        device=tactile.device,
+        dtype=tactile.dtype,
+    )
+    return torch.cat([tactile, pad], dim=1)
+
 
 def build_asymmetric_sa_mask(
     num_native: int,
@@ -136,7 +163,9 @@ class TriPathTactileEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # tactile_pred: (B, H, 3); vision_context: (B, D_v)
         history_tokens, vq_commit = self.history_vq(tactile_pred)
-        instant = self.instant_proj(tactile_pred[:, 0, :]).unsqueeze(1)
+        # Sequence is chronological (e.g. deltas [-6,-4,-2,0] → last row is current t=0).
+        current = tactile_pred[:, -1, :]
+        instant = self.instant_proj(current).unsqueeze(1)
         spatial = self.spatial_proj(vision_context).unsqueeze(1)
         tokens = torch.cat((history_tokens, instant, spatial), dim=1)
         pos = torch.arange(self.num_iht_tokens, device=tactile_pred.device, dtype=torch.long)
@@ -146,7 +175,7 @@ class TriPathTactileEncoder(nn.Module):
         return tokens, vq_commit
 
     def gate_event(self, tactile_pred: torch.Tensor) -> torch.Tensor:
-        return tactile_pred[:, 0, :]
+        return tactile_pred[:, -1, :]
 
 
 class WristWorldModel(nn.Module):

@@ -89,6 +89,12 @@ class FinetuneConfig:
     use_visor: bool = False
     """If True, enable VISOR flow-late tri-path IHT + tactile auxiliary loss."""
 
+    visor_tactile_mode: str = "imagine"
+    """VISOR tactile source: imagine (WWM), sensor (real tactile encoding), or hybrid."""
+
+    visor_train_wwm: bool = True
+    """If True, supervise WWM with tactile_gt (future chunk from tactile_future modality)."""
+
     visor_flow_tau_split: float = 0.4
     """VISOR activates when flow time t >= this split (GR00T: 0=noise, 1=clean)."""
 
@@ -96,8 +102,6 @@ class FinetuneConfig:
     """Number of VQ-discretized history tactile tokens in IHT."""
 
     visor_vq_codebook_size: int = 64
-    visor_vq_commit_weight: float = 0.1
-
     visor_vq_commit_weight: float = 0.1
     visor_use_contact_rate_prior: bool = True
     visor_use_semantic_gate: bool = True

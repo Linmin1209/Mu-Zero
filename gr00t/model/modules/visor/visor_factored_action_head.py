@@ -15,7 +15,12 @@ from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
 from gr00t.model.modules.component_action.component_factored_action_head import (
     build_component_factored_action_head,
 )
-from gr00t.model.modules.visor.visor import VisorModule, build_asymmetric_sa_mask
+from gr00t.model.modules.visor.visor import (
+    VisorModule,
+    align_tactile_horizon,
+    build_asymmetric_sa_mask,
+    normalize_visor_tactile_mode,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +43,10 @@ def build_visor_factored_action_head(base_cls: type):
             self.visor_detach_tactile_for_gate = bool(
                 getattr(config, "visor_detach_tactile_for_gate", True)
             )
+            self.visor_tactile_mode = normalize_visor_tactile_mode(
+                getattr(config, "visor_tactile_mode", "imagine")
+            )
+            self.visor_train_wwm = bool(getattr(config, "visor_train_wwm", True))
             self.register_buffer("_visor_train_step", torch.zeros((), dtype=torch.long), persistent=False)
 
             self.visor = VisorModule(
@@ -65,10 +74,12 @@ def build_visor_factored_action_head(base_cls: type):
             )
             logger.info(
                 "VisorFactoredActionHead: tau_split=%.2f iht_tokens=%d gate_components=%s "
-                "tactile_weight=%.3f warmup=%d",
+                "tactile_mode=%s train_wwm=%s tactile_weight=%.3f warmup=%d",
                 self.visor.flow_tau_split,
                 self.visor.iht_tokens,
                 sorted(self.visor_gate_components),
+                self.visor_tactile_mode,
+                self.visor_train_wwm,
                 self.visor.loss_weight_tactile,
                 self.visor_tactile_warmup_steps,
             )
@@ -81,6 +92,53 @@ def build_visor_factored_action_head(base_cls: type):
                 return 1.0
             step = float(self._visor_train_step.item())
             return min(1.0, step / float(self.visor_tactile_warmup_steps))
+
+        def _get_tactile_sensor(self, action_input) -> torch.Tensor | None:
+            return getattr(action_input, "tactile_sensor", None)
+
+        def _get_tactile_gt(self, action_input) -> torch.Tensor | None:
+            return getattr(action_input, "tactile_gt", None)
+
+        def _resolve_visor_tactile(
+            self,
+            action_input,
+            *,
+            trajectory: torch.Tensor,
+            flow_time: torch.Tensor,
+            vision_context: torch.Tensor,
+            proprio: torch.Tensor,
+            use_clean_action: bool,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]:
+            """Build tactile sequence + IHT tokens. Returns seq, iht, vq_commit, source."""
+            tactile_sensor = self._get_tactile_sensor(action_input)
+            use_sensor = self.visor_tactile_mode == "sensor" or (
+                self.visor_tactile_mode == "hybrid" and tactile_sensor is not None
+            )
+            if use_sensor:
+                if tactile_sensor is None:
+                    raise ValueError(
+                        f"visor_tactile_mode={self.visor_tactile_mode!r} requires "
+                        "tactile_sensor in the action batch."
+                    )
+                tactile_seq = tactile_sensor.to(
+                    device=trajectory.device, dtype=trajectory.dtype
+                )
+                if tactile_seq.shape[1] >= self.action_horizon:
+                    tactile_seq = align_tactile_horizon(tactile_seq, self.action_horizon)
+                source = "sensor"
+            else:
+                tactile_seq = self.visor.wwm(
+                    trajectory,
+                    flow_time,
+                    vision_context,
+                    proprio,
+                    use_clean_action=use_clean_action,
+                )
+                source = "imagine"
+            iht_tokens, vq_commit = self.visor.build_iht_tokens(
+                tactile_seq, vision_context, flow_time=flow_time
+            )
+            return tactile_seq, iht_tokens, vq_commit, source
 
         def decode_action_hidden(
             self,
@@ -207,21 +265,20 @@ def build_visor_factored_action_head(base_cls: type):
                 backbone_output.image_mask,
                 backbone_output.backbone_attention_mask,
             )
-            tactile_gt = getattr(action_input, "tactile_gt", None)
+            tactile_gt = self._get_tactile_gt(action_input)
+            tactile_sensor = self._get_tactile_sensor(action_input)
             coupling_lambda = self.visor.compute_coupling_lambda(
                 language_context,
-                tactile_gt=tactile_gt,
+                tactile_gt=tactile_gt if tactile_gt is not None else tactile_sensor,
             )
 
-            tactile_pred = self.visor.wwm(
-                noisy_trajectory,
-                t,
-                vision_context,
-                proprio,
+            tactile_seq, iht_tokens, vq_commit, tactile_source = self._resolve_visor_tactile(
+                action_input,
+                trajectory=noisy_trajectory,
+                flow_time=t,
+                vision_context=vision_context,
+                proprio=proprio,
                 use_clean_action=False,
-            )
-            iht_tokens, vq_commit = self.visor.build_iht_tokens(
-                tactile_pred, vision_context, flow_time=t
             )
             sa_embs = torch.cat((state_features, action_features, iht_tokens), dim=1)
 
@@ -236,7 +293,7 @@ def build_visor_factored_action_head(base_cls: type):
 
             hidden_action = model_output[:, 1 : 1 + self.action_horizon]
             gate_delta = self.visor.build_gate_delta(
-                tactile_pred,
+                tactile_seq,
                 flow_time=t,
                 coupling_lambda=coupling_lambda,
                 coupling_scale=coupling_scale,
@@ -264,8 +321,13 @@ def build_visor_factored_action_head(base_cls: type):
             tactile_loss = torch.zeros((), device=device, dtype=loss.dtype)
 
             refine_active = self.visor.refine_active(t).float().mean()
-            if tactile_gt is not None:
-                tactile_gt = tactile_gt.to(device=device, dtype=t.dtype)
+            tactile_gt_future = self._get_tactile_gt(action_input)
+            if (
+                tactile_gt_future is not None
+                and self.visor_train_wwm
+                and tactile_gt_future.shape[1] >= self.action_horizon
+            ):
+                tactile_gt_future = tactile_gt_future.to(device=device, dtype=t.dtype)
                 t_clean = torch.ones_like(t)
                 tactile_pred_supervised = self.visor.wwm(
                     actions,
@@ -276,7 +338,7 @@ def build_visor_factored_action_head(base_cls: type):
                 )
                 tactile_loss, tactile_stats = self.visor.compute_tactile_loss(
                     tactile_pred_supervised,
-                    tactile_gt,
+                    tactile_gt_future,
                     vq_commit_loss=vq_commit,
                     coupling_lambda=coupling_lambda,
                 )
@@ -293,7 +355,8 @@ def build_visor_factored_action_head(base_cls: type):
                 "action_mask": action_mask,
                 "backbone_features": vl_embeds,
                 "state_features": state_features,
-                "tactile_pred": tactile_pred.detach(),
+                "tactile_pred": tactile_seq.detach(),
+                "visor_tactile_source": tactile_source,
                 "visor_refine_active_rate": refine_active.detach(),
                 "visor_coupling_lambda": coupling_lambda.mean().detach(),
                 "visor_coupling_scale": torch.tensor(coupling_scale, device=device),
@@ -363,23 +426,24 @@ def build_visor_factored_action_head(base_cls: type):
 
                 gate_delta = None
                 if use_visor:
-                    tactile_pred = self.visor.wwm(
-                        actions,
-                        t_broadcast,
-                        vision_context,
-                        proprio,
+                    tactile_seq, iht_tokens, _, _ = self._resolve_visor_tactile(
+                        action_input,
+                        trajectory=actions,
+                        flow_time=t_broadcast,
+                        vision_context=vision_context,
+                        proprio=proprio,
                         use_clean_action=False,
                     )
+                    tactile_sensor = self._get_tactile_sensor(action_input)
+                    tactile_gt = self._get_tactile_gt(action_input)
                     coupling_lambda = self.visor.compute_coupling_lambda(
                         language_context,
-                        tactile_pred=tactile_pred,
-                    )
-                    iht_tokens, _ = self.visor.build_iht_tokens(
-                        tactile_pred, vision_context, flow_time=t_broadcast
+                        tactile_gt=tactile_gt if tactile_gt is not None else tactile_sensor,
+                        tactile_pred=tactile_seq,
                     )
                     sa_embs = torch.cat((state_features, action_features, iht_tokens), dim=1)
                     gate_delta = self.visor.build_gate_delta(
-                        tactile_pred,
+                        tactile_seq,
                         flow_time=t_broadcast,
                         coupling_lambda=coupling_lambda,
                         coupling_scale=1.0,

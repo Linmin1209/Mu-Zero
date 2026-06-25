@@ -146,6 +146,8 @@ if __name__ == "__main__":
     config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
     config.model.use_component_factored_head = ft_config.use_component_factored_head
     config.model.use_visor = ft_config.use_visor
+    config.model.visor_tactile_mode = ft_config.visor_tactile_mode
+    config.model.visor_train_wwm = ft_config.visor_train_wwm
     config.model.visor_flow_tau_split = ft_config.visor_flow_tau_split
     config.model.visor_history_vq_tokens = ft_config.visor_history_vq_tokens
     config.model.visor_vq_codebook_size = ft_config.visor_vq_codebook_size
@@ -209,7 +211,9 @@ if __name__ == "__main__":
         )
     if ft_config.use_visor:
         print(
-            f"[i] VISOR enabled (flow-late tri-path IHT, tau_split={ft_config.visor_flow_tau_split}, "
+            f"[i] VISOR enabled (mode={ft_config.visor_tactile_mode}, "
+            f"train_wwm={config.model.visor_train_wwm}, "
+            f"tau_split={ft_config.visor_flow_tau_split}, "
             f"history_vq={ft_config.visor_history_vq_tokens}, "
             f"tactile_weight={ft_config.visor_loss_weight_tactile})"
         )
@@ -281,5 +285,13 @@ if __name__ == "__main__":
     config.training.save_only_model = ft_config.save_only_model
     config.training.resume_from_checkpoint = ft_config.resume_from_checkpoint
     config.training.skip_weight_loading = ft_config.skip_weight_loading
+
+    import torch
+
+    if torch.cuda.is_available():
+        cc_major, _ = torch.cuda.get_device_capability()
+        if cc_major < 8:
+            config.training.tf32 = False
+            print("[i] GPU compute capability < 8.0 (e.g. V100): disabled tf32")
 
     run(config)

@@ -40,14 +40,18 @@ def extract_step_data(
         indices_to_load = [step_index + delta_index for delta_index in config.delta_indices]
         if allow_padding:
             indices_to_load = [max(0, min(idx, len(episode_data) - 1)) for idx in indices_to_load]
+        column_prefix = "tactile" if modality == "tactile_future" else modality
         for key in config.modality_keys:
-            if f"{modality}.{key}" in episode_data.columns:
+            col = f"{column_prefix}.{key}"
+            if col in episode_data.columns:
+                modality_data = episode_data[col].iloc[indices_to_load]
+            elif f"{modality}.{key}" in episode_data.columns:
                 modality_data = episode_data[f"{modality}.{key}"].iloc[indices_to_load]
             else:
                 raise KeyError(
                     f"{modality}.{key} not found in episode data, available keys: {episode_data.columns}"
                 )
-            if modality in ["state", "action", "tactile"]:
+            if modality in ["state", "action", "tactile", "tactile_future"]:
                 # Stack arrays for numerical modalities
                 step_data[modality][key] = np.vstack(
                     [
@@ -79,6 +83,9 @@ def extract_step_data(
     tactile_data = step_data.get("tactile")
     if tactile_data:
         vla_step_data.metadata["tactile"] = tactile_data
+    tactile_future_data = step_data.get("tactile_future")
+    if tactile_future_data:
+        vla_step_data.metadata["tactile_future"] = tactile_future_data
     return vla_step_data
 
 

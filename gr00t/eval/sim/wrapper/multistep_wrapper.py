@@ -164,6 +164,7 @@ class MultiStepWrapper(gym.Wrapper):
         max_episode_steps=None,
         reward_agg_method: AggregateMethod = AggregateMethod.MAX,
         terminate_on_success=False,
+        tactile_delta_indices=None,
     ):
         """
         video_delta_indices: np.ndarray[int], please check `assert_delta_indices` to see the requirements
@@ -192,12 +193,20 @@ class MultiStepWrapper(gym.Wrapper):
         else:
             self.state_horizon = None
             self.state_delta_indices = None
+        if tactile_delta_indices is not None:
+            self.tactile_delta_indices = tactile_delta_indices
+            self.tactile_horizon = len(tactile_delta_indices)
+            self.assert_delta_indices(self.tactile_delta_indices, self.tactile_horizon)
+        else:
+            self.tactile_delta_indices = None
+            self.tactile_horizon = None
 
         # Assign observation space
         self._observation_space = self.convert_observation_space(
             self.observation_space,
             self.video_horizon,
             self.state_horizon,
+            self.tactile_horizon,
         )
 
         # Assign other attributes
@@ -212,7 +221,7 @@ class MultiStepWrapper(gym.Wrapper):
         self.info = defaultdict(lambda: deque(maxlen=self.n_action_steps + 1))
         self.terminate_on_success = terminate_on_success
 
-    def convert_observation_space(self, observation_space, video_horizon, state_horizon):
+    def convert_observation_space(self, observation_space, video_horizon, state_horizon, tactile_horizon):
         """
         For video, the observation space will be (video_horizon,) + original shape
         For state (if not None), the observation space will be (state_horizon,) + original shape
@@ -234,6 +243,12 @@ class MultiStepWrapper(gym.Wrapper):
             elif k.startswith("annotation"):
                 text = observation_space[k]
                 new_observation_space[k] = text
+            elif k.startswith("tactile"):
+                box = observation_space[k]
+                if tactile_horizon is not None:
+                    new_observation_space[k] = repeated_space(box, tactile_horizon)
+                else:
+                    continue
             else:
                 warnings.warn(f"Key without a prefix: {k}")
                 box = observation_space[k]
@@ -255,7 +270,13 @@ class MultiStepWrapper(gym.Wrapper):
             )
         else:
             state_max_steps_needed = 0
-        return int(max(video_max_steps_needed, state_max_steps_needed))
+        if self.tactile_delta_indices is not None:
+            tactile_max_steps_needed = (
+                np.max(self.tactile_delta_indices) - np.min(self.tactile_delta_indices) + 1
+            )
+        else:
+            tactile_max_steps_needed = 0
+        return int(max(video_max_steps_needed, state_max_steps_needed, tactile_max_steps_needed))
 
     def assert_delta_indices(self, delta_indices: np.ndarray, horizon: int):
         # Check the length
@@ -282,7 +303,11 @@ class MultiStepWrapper(gym.Wrapper):
         self.done = list()
         self.info = defaultdict(lambda: deque(maxlen=self.n_action_steps + 1))
 
-        obs = self._get_obs(self.video_delta_indices, self.state_delta_indices)
+        obs = self._get_obs(
+            self.video_delta_indices,
+            self.state_delta_indices,
+            self.tactile_delta_indices,
+        )
         info = {k: [v] for k, v in info.items()}
         if "intermediate_signals" in info:
             # "intermediate_signals" contain the metrics for 5DC tasks to indicate language following
@@ -319,7 +344,11 @@ class MultiStepWrapper(gym.Wrapper):
             self.done.append(done)
             self._add_info(info)
 
-        observation = self._get_obs(self.video_delta_indices, self.state_delta_indices)
+        observation = self._get_obs(
+            self.video_delta_indices,
+            self.state_delta_indices,
+            self.tactile_delta_indices,
+        )
         reward = aggregate(self.reward, self.reward_agg_method)
         done = aggregate(self.done, AggregateMethod.MAX)
         info = dict_take_last_n(self.info, self.n_action_steps)
@@ -352,7 +381,7 @@ class MultiStepWrapper(gym.Wrapper):
 
         return observation, reward, done, truncated, info
 
-    def _get_obs(self, video_delta_indices, state_delta_indices):
+    def _get_obs(self, video_delta_indices, state_delta_indices, tactile_delta_indices=None):
         """
         Output:
         For video: (video_horizon,) + obs_shape
@@ -385,6 +414,13 @@ class MultiStepWrapper(gym.Wrapper):
                     result[key] = np.stack(this_obs, axis=0)
                 elif key.startswith("annotation"):
                     result[key] = self.obs[-1][key]
+                elif key.startswith("tactile"):
+                    if tactile_delta_indices is not None:
+                        delta_indices = tactile_delta_indices - 1
+                        this_obs = [self.obs[i][key] for i in delta_indices]
+                        result[key] = np.stack(this_obs, axis=0)
+                    else:
+                        result[key] = self.obs[-1][key]
                 else:
                     if state_delta_indices is not None:
                         delta_indices = state_delta_indices - 1

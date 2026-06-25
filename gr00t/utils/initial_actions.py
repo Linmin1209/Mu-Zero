@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 """Safe (pickle-free) save/load for the per-dataset initial-actions cache.
 
 Why this isn't just ``np.savez(path, the_nested_list)``:

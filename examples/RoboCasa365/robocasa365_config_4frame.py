@@ -4,7 +4,10 @@
 """
 RoboCasa365 modality config with 4-frame video history: delta_indices [-6, -4, -2, 0].
 
-State / language stay at the current timestep ([0]). Action horizon unchanged (40).
+Tactile uses the same delta_indices so at decision step t you load
+tactile at t-6, t-4, t-2, t (aligned with video). tactile_future loads
+t..t+39 for WWM future tactile supervision. State / language at [0].
+Action horizon remains 40 future steps.
 """
 
 from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
@@ -19,6 +22,10 @@ from gr00t.data.types import (
 
 ACTION_HORIZON = 40
 VIDEO_DELTA_INDICES = [-6, -4, -2, 0]
+# Tactile history aligned with 4-frame video (same relative times as images).
+TACTILE_HISTORY_DELTA_INDICES = VIDEO_DELTA_INDICES
+# Future tactile chunk (t..t+39) for WWM auxiliary supervision.
+TACTILE_FUTURE_DELTA_INDICES = list(range(ACTION_HORIZON))
 
 robocasa365_panda_omron_config = {
     "video": ModalityConfig(
@@ -81,7 +88,11 @@ robocasa365_panda_omron_config = {
         modality_keys=["annotation.human.task_description"],
     ),
     "tactile": ModalityConfig(
-        delta_indices=list(range(ACTION_HORIZON)),
+        delta_indices=TACTILE_HISTORY_DELTA_INDICES,
+        modality_keys=["left", "right", "contact"],
+    ),
+    "tactile_future": ModalityConfig(
+        delta_indices=TACTILE_FUTURE_DELTA_INDICES,
         modality_keys=["left", "right", "contact"],
     ),
 }

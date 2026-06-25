@@ -15,6 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 """
 LeRobot Dataset Loader
 
@@ -56,7 +58,7 @@ LEROBOT_MODALITY_FILENAME = "modality.json"
 LEROBOT_STATS_FILE_NAME = "stats.json"
 LEROBOT_RELATIVE_STATS_FILE_NAME = "relative_stats.json"
 
-ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask", "tactile"]
+ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask", "tactile", "tactile_future"]
 DEFAULT_COLUMN_NAMES = {
     "state": "observation.state",
     "action": "action",
