@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PyTorch Dataset for LEO × RoboCasa365 manifest (multi-task LoRA training)."""
+"""PyTorch Dataset for LEO × RoboCasa365 (manifest index + GR00T LeRobot loader)."""
 
 from __future__ import annotations
 
@@ -8,140 +8,122 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-VIDEO_KEYS = [
-    "observation.images.robot0_agentview_left",
-    "observation.images.robot0_agentview_right",
-    "observation.images.robot0_eye_in_hand",
-]
-STATE_KEYS = [
-    "observation.state.base_position",
-    "observation.state.base_rotation",
-    "observation.state.end_effector_position_relative",
-    "observation.state.end_effector_rotation_relative",
-    "observation.state.gripper_qpos",
-]
-ACTION_KEYS = [
-    "action.gripper_close",
-    "action.end_effector_position",
-    "action.end_effector_rotation",
-    "action.base_motion",
-    "action.control_mode",
-]
-
-
-def _flatten_action(row: pd.Series) -> np.ndarray:
-    parts: list[np.ndarray] = []
-    for k in ACTION_KEYS:
-        if k not in row.index:
-            continue
-        val = row[k]
-        arr = np.asarray(val, dtype=np.float32).reshape(-1)
-        parts.append(arr)
-    if not parts:
-        return np.zeros(12, dtype=np.float32)
-    out = np.concatenate(parts)
-    if out.shape[0] < 12:
-        out = np.pad(out, (0, 12 - out.shape[0]))
-    return out[:12].astype(np.float32)
-
-
-def _flatten_state(row: pd.Series) -> np.ndarray:
-    parts: list[np.ndarray] = []
-    for k in STATE_KEYS:
-        if k not in row.index:
-            continue
-        val = row[k]
-        arr = np.asarray(val, dtype=np.float32).reshape(-1)
-        parts.append(arr)
-    if not parts:
-        return np.zeros(16, dtype=np.float32)
-    return np.concatenate(parts).astype(np.float32)
-
-
-def _video_path(lerobot_root: Path, video_key: str, episode_index: int) -> Path:
-    rel = video_key.replace("observation.images.", "")
-    return lerobot_root / "videos" / "chunk-000" / rel / f"episode_{episode_index:06d}.mp4"
+from leo_rc365_action_norm import normalize_action
+from leo_rc365_lerobot import RC365_VIDEO_KEYS, get_lerobot_loader
+from leo_rc365_sanitize import sanitize_3d_numpy
 
 
 class LeoRc365ManifestDataset(Dataset):
+    """Flat manifest index; per-sample IO via CachedRoboCasaLeRobotLoader (LeRobot v2.1)."""
+
     def __init__(
         self,
         manifest_path: Path | str,
-        video_backend: str = "opencv",
+        video_backend: str = "opencv",  # kept for CLI compat; loader picks torchcodec or robocasa cv2
         image_size: int = 224,
         max_samples: int = 0,
+        use_3d: bool = False,
+        require_3d: bool = False,
+        num_points: int = 1024,
+        normalize_action: bool = False,
     ):
         self.manifest_path = Path(manifest_path)
-        self.video_backend = video_backend
         self.image_size = image_size
+        self.use_3d = use_3d
+        self.require_3d = require_3d
+        self.num_points = num_points
+        self.normalize_action = normalize_action
         self.rows: list[dict[str, Any]] = []
         with self.manifest_path.open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    self.rows.append(json.loads(line))
+                if not line:
+                    continue
+                row = json.loads(line)
+                if require_3d and not row.get("has_3d"):
+                    continue
+                self.rows.append(row)
         if max_samples > 0:
             self.rows = self.rows[:max_samples]
-
-        self._parquet_cache: dict[str, pd.DataFrame] = {}
 
     def __len__(self) -> int:
         return len(self.rows)
 
-    def _load_frame_rgb(self, video_path: Path, frame_index: int) -> np.ndarray:
-        from gr00t.utils.video_utils import get_frames_by_indices
+    def _resize_image(self, img: np.ndarray) -> np.ndarray:
+        from PIL import Image
 
-        frames = get_frames_by_indices(
-            str(video_path),
-            [frame_index],
-            video_backend=self.video_backend,
+        if img.shape[0] == self.image_size and img.shape[1] == self.image_size:
+            return img.astype(np.uint8)
+        return np.asarray(
+            Image.fromarray(img.astype(np.uint8)).resize(
+                (self.image_size, self.image_size), Image.BILINEAR
+            )
         )
-        img = frames[0]
-        if img.dtype != np.uint8:
-            img = (np.clip(img, 0, 1) * 255).astype(np.uint8)
-        return img
-
-    def _get_parquet_row(self, lerobot_root: Path, episode_index: int, frame_index: int) -> pd.Series:
-        key = f"{lerobot_root}:{episode_index}"
-        if key not in self._parquet_cache:
-            pq = lerobot_root / "data" / "chunk-000" / f"episode_{episode_index:06d}.parquet"
-            if not pq.is_file():
-                matches = sorted(lerobot_root.glob(f"data/chunk-*/episode_{episode_index:06d}.parquet"))
-                pq = matches[0] if matches else pq
-            self._parquet_cache[key] = pd.read_parquet(pq)
-        df = self._parquet_cache[key]
-        idx = min(frame_index, len(df) - 1)
-        return df.iloc[idx]
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         meta = self.rows[index]
         lerobot_root = Path(meta["lerobot_root"])
         ep = int(meta["episode_index"])
         fi = int(meta["frame_index"])
+        task = str(meta.get("task", ""))
 
-        images = []
-        for vk in VIDEO_KEYS:
-            vp = _video_path(lerobot_root, vk, ep)
-            if vp.is_file():
-                images.append(self._load_frame_rgb(vp, fi))
-            else:
-                images.append(np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8))
+        loader = get_lerobot_loader(lerobot_root)
+        step = loader.load_step(ep, fi)
 
-        row = self._get_parquet_row(lerobot_root, ep, fi)
-        state = _flatten_state(row)
-        action = _flatten_action(row)
+        images = [
+            self._resize_image(img) for img in step["images_nhwc"]
+        ]
+        if len(images) != len(RC365_VIDEO_KEYS):
+            raise RuntimeError(f"Expected {len(RC365_VIDEO_KEYS)} views, got {len(images)}")
 
         imgs = np.stack(images, axis=0).astype(np.float32) / 255.0
         imgs = torch.from_numpy(imgs).permute(0, 3, 1, 2)
 
-        return {
+        language = step.get("language") or meta.get("language") or task
+        if isinstance(language, str) and language.isdigit():
+            language = meta.get("language") or task
+
+        action = torch.from_numpy(step["action"])
+        if self.normalize_action:
+            action = normalize_action(action, lerobot_root)
+
+        sample: dict[str, Any] = {
             "images": imgs,
-            "state": torch.from_numpy(state),
-            "action": torch.from_numpy(action),
-            "language": meta.get("language", meta.get("task", "")),
-            "task": meta.get("task", ""),
+            "state": torch.from_numpy(step["state"]),
+            "action": action,
+            "language": language,
+            "task": task,
+            "lerobot_root": str(lerobot_root),
+            "num_points": self.num_points,
         }
+
+        if self.use_3d:
+            pcd_path = meta.get("pcd3d_path")
+            if pcd_path and Path(pcd_path).is_file():
+                pcd = np.load(pcd_path)
+                cleaned = sanitize_3d_numpy(
+                    pcd["obj_fts"],
+                    pcd["obj_locs"],
+                    anchor_locs=pcd["anchor_locs"] if "anchor_locs" in pcd else None,
+                    anchor_orientation=pcd["anchor_orientation"] if "anchor_orientation" in pcd else None,
+                )
+                sample["obj_fts"] = torch.from_numpy(cleaned["obj_fts"])
+                sample["obj_locs"] = torch.from_numpy(cleaned["obj_locs"])
+                sample["anchor_locs"] = torch.from_numpy(
+                    cleaned["anchor_locs"]
+                    if cleaned["anchor_locs"] is not None
+                    else np.zeros(3, dtype=np.float32)
+                )
+                sample["anchor_orientation"] = torch.from_numpy(
+                    cleaned["anchor_orientation"]
+                    if cleaned["anchor_orientation"] is not None
+                    else np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+                )
+                sample["has_3d"] = bool(cleaned["obj_masks"].any())
+            else:
+                sample["has_3d"] = False
+
+        return sample

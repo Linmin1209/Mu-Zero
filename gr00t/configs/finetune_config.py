@@ -77,6 +77,12 @@ class FinetuneConfig:
     tune_motion: bool = True
     """If True and use_motion, train motion_block while keeping the rest of vision frozen."""
 
+    motion_use_gating: bool = True
+    """If True and use_motion, gate MOSS residual with task (language) + modality context."""
+
+    motion_gate_hidden: int = 256
+    """Hidden size of the MOSS fusion gate MLP."""
+
     gradient_checkpointing: bool | None = None
     """Enable activation checkpointing. Default: auto-on when use_motion is True."""
 

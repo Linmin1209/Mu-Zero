@@ -27,6 +27,9 @@ PROJECT_ROOT = RC365_DIR.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 from gr00t.experiment.robocasa365_datasets import resolve_robocasa365_dataset_paths  # noqa: E402
 
+sys.path.insert(0, str(SCRIPT_DIR))
+from leo_3d_utils import pcd_npz_path  # noqa: E402
+
 VIDEO_KEYS = [
     "observation.images.robot0_agentview_left",
     "observation.images.robot0_agentview_right",
@@ -57,6 +60,57 @@ def load_target50_tasks(task_yaml: Path) -> list[str]:
     )
 
 
+def load_task_split_map(task_yaml: Path) -> dict[str, str]:
+    """Map each target50 task to its LeRobot split (pretrain vs target)."""
+    cfg = yaml.safe_load(task_yaml.read_text())
+    mapping: dict[str, str] = {}
+    for task in cfg.get("atomic_seen", []):
+        mapping[task] = "pretrain"
+    for task in cfg.get("composite_seen", []):
+        mapping[task] = "pretrain"
+    for task in cfg.get("composite_unseen", []):
+        mapping[task] = "target"
+    return mapping
+
+
+def resolve_task_lerobot_roots(
+    robocasa365_root: Path,
+    task: str,
+    preferred_split: str | None = None,
+) -> list[str]:
+    """Resolve lerobot root(s) for one task, trying preferred split then fallbacks."""
+    splits: list[str]
+    if preferred_split:
+        splits = [preferred_split, "all"]
+    else:
+        splits = ["pretrain", "target", "all"]
+
+    seen: set[str] = set()
+    paths: list[str] = []
+    for split in splits:
+        if split in seen:
+            continue
+        seen.add(split)
+        try:
+            found = resolve_robocasa365_dataset_paths(
+                root=robocasa365_root,
+                split=split,
+                category="all",
+                tasks=task,
+            )
+            paths.extend(found)
+        except FileNotFoundError:
+            continue
+    # Deduplicate while preserving order
+    out: list[str] = []
+    used: set[str] = set()
+    for p in paths:
+        if p not in used:
+            used.add(p)
+            out.append(p)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -68,7 +122,7 @@ def main() -> int:
     )
     parser.add_argument("--task-yaml", type=Path, default=RC365_DIR / "task_sets.yaml")
     parser.add_argument(
-        "--split", default="pretrain", choices=["pretrain", "target", "all"]
+        "--split", default="target50", choices=["pretrain", "target", "all", "target50"]
     )
     parser.add_argument(
         "--output",
@@ -77,22 +131,47 @@ def main() -> int:
     )
     parser.add_argument("--max-episodes-per-task", type=int, default=0, help="0=all")
     parser.add_argument("--stride", type=int, default=1, help="Frame subsample stride")
+    parser.add_argument(
+        "--pcd-root",
+        type=Path,
+        default=SCRIPT_DIR / "data" / "leo_3d_cache",
+        help="Root of replayed 3D cache (depth + cameras + scene_pcd.npz)",
+    )
+    parser.add_argument(
+        "--link-3d",
+        action="store_true",
+        help="Attach pcd3d_path / has_3d fields when scene_pcd.npz exists",
+    )
     args = parser.parse_args()
 
     tasks = load_target50_tasks(args.task_yaml)
+    task_split_map = load_task_split_map(args.task_yaml)
     lerobot_roots: list[str] = []
     missing: list[str] = []
+    task_to_roots: dict[str, list[str]] = {}
+
     for task in tasks:
-        try:
-            paths = resolve_robocasa365_dataset_paths(
-                root=args.robocasa365_root,
-                split=args.split,
-                category="all",
-                tasks=task,
-            )
-            lerobot_roots.extend(paths)
-        except FileNotFoundError:
+        if args.split == "target50":
+            preferred = task_split_map.get(task)
+        elif args.split == "all":
+            preferred = None
+        else:
+            preferred = args.split
+
+        roots = resolve_task_lerobot_roots(args.robocasa365_root, task, preferred)
+        if roots:
+            task_to_roots[task] = roots
+            lerobot_roots.extend(roots)
+        else:
             missing.append(task)
+
+    if args.split == "target50":
+        deduped: list[str] = []
+        for task in tasks:
+            roots = task_to_roots.get(task, [])
+            if roots:
+                deduped.append(roots[-1])
+        lerobot_roots = deduped
 
     found_tasks = {Path(p).parent.parent.name for p in lerobot_roots}
     if missing:
@@ -105,6 +184,7 @@ def main() -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     n_lines = 0
+    n_with_3d = 0
     with args.output.open("w", encoding="utf-8") as out_f:
         for lerobot_root in lerobot_roots:
             root = Path(lerobot_root)
@@ -128,17 +208,27 @@ def main() -> int:
                 df = pd.read_parquet(parquet_path)
                 for row_i in range(0, len(df), args.stride):
                     row = df.iloc[row_i]
+                    fi = int(row.get("frame_index", row_i))
                     frame = {
                         "task": task_name,
+                        "split": task_split_map.get(task_name, args.split),
                         "lerobot_root": str(root),
                         "episode_index": ep_idx,
-                        "frame_index": int(row.get("frame_index", row_i)),
+                        "frame_index": fi,
                         "fps": fps,
                         "language": default_lang,
                         "video_keys": VIDEO_KEYS,
                         "state_keys": STATE_KEYS,
                         "action_keys": ACTION_KEYS,
                     }
+                    if args.link_3d:
+                        p3d = pcd_npz_path(args.pcd_root, task_name, ep_idx, fi)
+                        frame["pcd3d_path"] = str(p3d)
+                        frame["pcd3d_dir"] = str(p3d.parent)
+                        frame["cameras_json"] = str(p3d.parent / "cameras.json")
+                        frame["has_3d"] = p3d.is_file()
+                        if frame["has_3d"]:
+                            n_with_3d += 1
                     for k in STATE_KEYS + ACTION_KEYS:
                         if k in row.index:
                             val = row[k]
@@ -149,10 +239,17 @@ def main() -> int:
                     n_lines += 1
 
     summary = {
+        "split_mode": args.split,
         "tasks_requested": len(tasks),
         "tasks_with_data": len(found_tasks),
         "missing_tasks": missing,
         "tasks_available_for_training": sorted(found_tasks),
+        "task_splits": {t: task_split_map.get(t) for t in sorted(found_tasks)},
+        "max_episodes_per_task": args.max_episodes_per_task,
+        "stride": args.stride,
+        "pcd_root": str(args.pcd_root),
+        "link_3d": args.link_3d,
+        "frames_with_3d": n_with_3d,
         "manifest": str(args.output),
         "num_frames": n_lines,
     }
@@ -161,6 +258,8 @@ def main() -> int:
     print(f"[i] Wrote {args.output} ({n_lines} frames)")
     print(f"[i] Summary: {summary_path}")
     print(f"[i] Tasks with data: {len(found_tasks)}/{len(tasks)}")
+    if args.link_3d:
+        print(f"[i] Frames with 3D cache: {n_with_3d}/{n_lines}")
     return 0
 
 

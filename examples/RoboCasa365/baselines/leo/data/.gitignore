@@ -1,0 +1,4 @@
+# Generated locally via convert_robocasa365_data.sh (~1GB); exceeds GitHub 100MB limit.
+manifest_target50.jsonl
+manifest_target50_pretrain.jsonl
+leo_3d_cache/

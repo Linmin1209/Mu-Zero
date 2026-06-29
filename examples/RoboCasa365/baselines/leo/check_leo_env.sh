@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 LEO_REPO="${LEO_REPO:-$PROJECT_ROOT/../embodied-generalist}"
 PYTHON="${PYTHON:-/XYAIFS00/sysu_xdliang_1/miniconda3/envs/leo/bin/python}"
+# shellcheck source=leo_env.sh
+source "$SCRIPT_DIR/leo_env.sh"
 
 echo "[i] PYTHON=$PYTHON"
 echo "[i] LEO_REPO=$LEO_REPO"

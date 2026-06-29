@@ -18,11 +18,19 @@ cat <<EOF
 
 === LEO setup (run in conda env 'leo') ===
 
-  conda create -n leo python=3.9 -y
+  # Python 3.10 recommended for torch 2.x + H100 (sm_90)
+  conda create -n leo python=3.10 -y
   conda activate leo
-  conda install pytorch==1.12.1 torchvision==0.13.1 cudatoolkit=11.3 -c pytorch -y
+
+  # H100 / A100: torch 2.1+ cu121 (includes sm_90). Legacy V100-only nodes can use cu118.
+  pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
+
+  # Or run the upgrade script on an existing leo env:
+  #   bash "$SCRIPT_DIR/upgrade_leo_torch_h100.sh"
+
   pip install -r "$LEO_REPO/requirements.txt"
   pip install peft==0.5.0 --no-deps "huggingface_hub>=0.26"
+  pip install pyarrow
 
   # PointNet++ (required)
   cd "$LEO_REPO/model/pointnetpp" && python setup.py install && cd -
@@ -32,6 +40,9 @@ cat <<EOF
 
   # Vicuna-7B + PointNet++ backbone + patch configs
   bash "$SCRIPT_DIR/download_leo_deps.sh"
+
+  # ConvNeXt/CLIP 2D backbone (local: HDD_POOL/linmin/models)
+  bash "$SCRIPT_DIR/download_leo_vision2d.sh"
 
   # PointNet++ CUDA extension (required for LeoAgent import)
   bash "$SCRIPT_DIR/install_leo_pointnetpp.sh"

@@ -22,6 +22,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from gr00t.model.modules.qwen3_motion import (
     MotionConfig,
     install_motion_module,
+    pool_motion_gate_text_context,
     set_motion_trainable,
 )
 
@@ -246,6 +247,9 @@ class Qwen3Backbone(torch.nn.Module):
                 ):
                     if hasattr(self.model.visual, "motion_block") and self.model.visual.motion_block:
                         self.model.visual.motion_block.train()
+                    motion_gate = getattr(self.model.visual, "motion_gate", None)
+                    if motion_gate is not None:
+                        motion_gate.train()
 
     def _reset_rotary_inv_freq(self) -> None:
         """Re-derive Qwen3-VL's non-persistent RoPE ``inv_freq`` buffers once at load.
@@ -325,16 +329,64 @@ class Qwen3Backbone(torch.nn.Module):
         self.model.visual._gr00t_num_frames = nf
         self.model.visual._gr00t_num_views = nv
 
+    def _register_motion_gate_embed_hook(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.utils.hooks.RemovableHandle | None:
+        """Capture text context from Qwen3-VL's single embed_tokens call (no duplicate embed)."""
+        visual = self.model.visual
+        if getattr(visual, "motion_gate", None) is None:
+            visual._gr00t_motion_text_context = None
+            return None
+
+        image_token_id = getattr(self.model.config, "image_token_id", None)
+        if image_token_id is None:
+            visual._gr00t_motion_text_context = None
+            return None
+
+        embed = self.model.get_input_embeddings()
+        hook_removed = False
+
+        def _on_embed(_module, _inputs, outputs: torch.Tensor) -> None:
+            nonlocal hook_removed
+            if hook_removed:
+                return
+            visual._gr00t_motion_text_context = pool_motion_gate_text_context(
+                outputs,
+                attention_mask,
+                input_ids,
+                image_token_id,
+            )
+            hook_removed = True
+
+        return embed.register_forward_hook(_on_embed)
+
     def forward(self, vl_input: BatchFeature) -> BatchFeature:
         self.set_frozen_modules_to_eval_mode()
         vl_dict = dict(vl_input)
         self._set_motion_batch_meta(vl_dict)
         keys_to_use = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
-        vl_input = {k: vl_dict[k] for k in keys_to_use if k in vl_dict}
-        outputs = self.model(**vl_input, output_hidden_states=True)
+        model_kwargs = {k: vl_dict[k] for k in keys_to_use if k in vl_dict}
+
+        embed_hook = None
+        if "input_ids" in model_kwargs and "attention_mask" in model_kwargs:
+            embed_hook = self._register_motion_gate_embed_hook(
+                model_kwargs["input_ids"],
+                model_kwargs["attention_mask"],
+            )
+        else:
+            self.model.visual._gr00t_motion_text_context = None
+
+        try:
+            outputs = self.model(**model_kwargs, output_hidden_states=True)
+        finally:
+            if embed_hook is not None:
+                embed_hook.remove()
+
         outputs = outputs.hidden_states[-1]
-        image_mask = vl_input["input_ids"] == self.model.config.image_token_id
-        attention_mask = vl_input["attention_mask"] == 1
+        image_mask = vl_dict["input_ids"] == self.model.config.image_token_id
+        attention_mask = model_kwargs["attention_mask"] == 1
         return BatchFeature(
             data={
                 "backbone_features": outputs,

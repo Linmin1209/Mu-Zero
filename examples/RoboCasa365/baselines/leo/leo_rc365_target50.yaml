@@ -32,12 +32,16 @@ train:
   gradient_accumulation_steps: 1
 
 data:
-  manifest: data/manifest_target50_pretrain.jsonl
+  manifest: data/manifest_target50.jsonl
   split: pretrain
   task_set: target50
   num_views: 3
   action_dim: 12
-  use_3d: false  # v1: 2D + proprio; set true when pointcloud pipeline ready
+  normalize_action: true
+  use_3d: true
+  require_3d: false
+  num_points: 1024
+  pcd_root: data/leo_3d_cache
 
 action_head:
   hidden_dim: 1024

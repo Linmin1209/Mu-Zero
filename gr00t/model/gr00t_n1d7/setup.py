@@ -28,7 +28,11 @@ from gr00t.experiment.dist_utils import run_or_wait_on_rank0
 from gr00t.model.base.model_pipeline import ModelPipeline
 from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
 from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
-from gr00t.model.modules.qwen3_motion import is_motion_missing_key, motion_config_from_model_config
+from gr00t.model.modules.qwen3_motion import (
+    ensure_motion_gate,
+    is_motion_missing_key,
+    motion_config_from_model_config,
+)
 from gr00t.model.registry import register_model
 
 
@@ -47,8 +51,13 @@ def _is_adaptive_action_head_key(key: str) -> bool:
 
 
 def _is_component_factored_decoder_key(key: str) -> bool:
-    return key.startswith("action_head.component_decoders") or key.startswith(
-        "action_head.extra_decoders"
+    return key.startswith(
+        (
+            "action_head.component_decoders",
+            "action_head.extra_decoders",
+            "action_head.component_lora_adapters",
+            "action_head.extra_lora_adapters",
+        )
     )
 
 
@@ -190,6 +199,8 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 "motion_gradient_check",
                 "motion_int_mode",
                 "tune_motion",
+                "motion_use_gating",
+                "motion_gate_hidden",
             ):
                 if hasattr(self.config.model, motion_field):
                     setattr(model_cfg, motion_field, getattr(self.config.model, motion_field))
@@ -273,20 +284,22 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     model, self.config.training.start_from_checkpoint
                 )
             if getattr(model.config, "use_motion", False):
-                motion_block = getattr(model.backbone.model.visual, "motion_block", None)
+                visual = model.backbone.model.visual
+                motion_block = getattr(visual, "motion_block", None)
+                motion_cfg = motion_config_from_model_config(model.config)
                 if motion_block is None:
                     from gr00t.model.modules.qwen3_motion import install_motion_module
 
-                    install_motion_module(
-                        model.backbone.model.visual,
-                        motion_config_from_model_config(model.config),
-                    )
+                    install_motion_module(visual, motion_cfg)
                     model.backbone._convert_motion_bn_to_float()
-                    model.backbone.model.visual._gr00t_tune_motion_only = (
+                    visual._gr00t_tune_motion_only = (
                         getattr(model.config, "tune_motion", True)
                         and not getattr(model.config, "tune_visual", False)
                     )
-                    logging.info("Installed MotionModule after checkpoint load (weights initialized)")
+                    logging.info(
+                        "Installed MotionModule after checkpoint load (weights initialized)"
+                    )
+                ensure_motion_gate(visual, motion_cfg)
             errors = []
             if other_missing:
                 errors.append(f"Missing keys ({len(other_missing)}): {other_missing}")

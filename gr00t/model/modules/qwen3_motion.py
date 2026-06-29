@@ -10,12 +10,29 @@ import logging
 from typing import Any
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from gr00t.model.modules.motion import MotionModule
 
 logger = logging.getLogger(__name__)
+
+
+def pool_motion_gate_text_context(
+    inputs_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    input_ids: torch.Tensor,
+    image_token_id: int,
+) -> torch.Tensor:
+    """Mean-pool text token embeddings (exclude image placeholder positions)."""
+    text_mask = attention_mask.bool() & (input_ids != image_token_id)
+    if not torch.any(text_mask):
+        return inputs_embeds.mean(dim=1)
+    mask = text_mask.unsqueeze(-1).to(dtype=inputs_embeds.dtype)
+    summed = (inputs_embeds * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp(min=1.0)
+    return summed / counts
 
 
 @dataclass
@@ -36,6 +53,65 @@ class MotionConfig:
     motion_gradient_check: bool = False
     motion_int_mode: str = "lite"
     tune_motion: bool = True
+    motion_use_gating: bool = True
+    motion_gate_hidden: int = 256
+
+
+class MotionFusionGate(nn.Module):
+    """Scalar gate per batch: h' = h + g * moss_delta."""
+
+    def __init__(self, embed_dim: int, hidden_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim * 3, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.constant_(self.net[-1].bias, 3.0)
+
+    def forward(
+        self,
+        text_ctx: torch.Tensor,
+        vision_ctx: torch.Tensor,
+        temporal_ctx: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.sigmoid(self.net(torch.cat([text_ctx, vision_ctx, temporal_ctx], dim=-1)))
+
+
+def _pool_hidden_for_gate(hidden_5d: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    frame_tokens = hidden_5d.mean(dim=(2, 3))
+    vision_ctx = frame_tokens.mean(dim=1)
+    temporal_ctx = frame_tokens.std(dim=1)
+    return vision_ctx, temporal_ctx
+
+
+def _apply_motion_gate(
+    visual: Any,
+    moss_delta: torch.Tensor,
+    hidden_5d: torch.Tensor,
+    true_batch: int,
+) -> torch.Tensor:
+    gate_module = getattr(visual, "motion_gate", None)
+    if gate_module is None:
+        return moss_delta
+
+    text_ctx = getattr(visual, "_gr00t_motion_text_context", None)
+    vision_ctx, temporal_ctx = _pool_hidden_for_gate(hidden_5d)
+    if text_ctx is None:
+        text_ctx = torch.zeros_like(vision_ctx)
+    if text_ctx.shape[0] != true_batch:
+        raise ValueError(
+            f"motion gate text context batch ({text_ctx.shape[0]}) != vision batch ({true_batch})"
+        )
+
+    gate_dtype = moss_delta.dtype
+    gate = gate_module(
+        text_ctx.to(dtype=gate_dtype),
+        vision_ctx.to(dtype=gate_dtype),
+        temporal_ctx.to(dtype=gate_dtype),
+    )
+    return moss_delta * gate.view(true_batch, 1, 1, 1, 1)
 
 
 def apply_moss(
@@ -118,10 +194,13 @@ def apply_moss(
     moss_out = moss_out.permute(0, 1, 2, 3, 5, 4, 6, 7).contiguous()
     moss_out = moss_out.reshape(true_batch, num_frames, num_views, num_patches, hidden_dim)
 
+    moss_delta = moss_out.reshape(true_batch, num_frames, num_views, num_patches, hidden_dim)
+    moss_delta = _apply_motion_gate(visual, moss_delta, hidden_5d, true_batch)
+
     injection_point = getattr(visual, "motion_injection_point", "vision_encoder")
     if injection_point == "vision_encoder":
-        return hidden_states + moss_out.reshape(-1, hidden_dim)
-    visual._moss_features = moss_out
+        return hidden_states + moss_delta.reshape(-1, hidden_dim)
+    visual._moss_features = moss_delta
     visual._moss_meta = (true_batch, num_frames, num_views, int(h), int(w))
     return hidden_states
 
@@ -235,6 +314,21 @@ def _visual_forward_with_motion(
     return hidden_states, deepstack_feature_lists
 
 
+def ensure_motion_gate(visual: Any, config: MotionConfig) -> None:
+    if not config.use_motion or not config.motion_use_gating:
+        return
+    if getattr(visual, "motion_gate", None) is not None:
+        return
+    hidden_size = visual.config.hidden_size
+    visual.motion_gate = MotionFusionGate(hidden_size, config.motion_gate_hidden)
+    visual._gr00t_motion_text_context = None
+    logger.info(
+        "Installed MotionFusionGate (hidden=%s, gate_hidden=%s)",
+        hidden_size,
+        config.motion_gate_hidden,
+    )
+
+
 def install_motion_module(visual: Any, config: MotionConfig) -> None:
     """Attach MotionModule to a HF Qwen3VLVisionModel and patch its forward pass."""
     if not config.use_motion:
@@ -242,10 +336,12 @@ def install_motion_module(visual: Any, config: MotionConfig) -> None:
 
     visual.motion_insert_layer = config.motion_insert_layer
     visual.motion_injection_point = config.motion_injection_point
+    visual.motion_use_gating = config.motion_use_gating
     visual._moss_features = None
     visual._moss_meta = None
     visual._gr00t_num_frames = 1
     visual._gr00t_num_views = 1
+    visual._gr00t_motion_text_context = None
     visual._gr00t_use_motion_checkpoint = True
     visual._gr00t_tune_motion_only = False
     if not hasattr(visual, "_gradient_checkpointing_func") or visual._gradient_checkpointing_func is None:
@@ -269,6 +365,11 @@ def install_motion_module(visual: Any, config: MotionConfig) -> None:
         int_mode=config.motion_int_mode,
     )
     visual.motion_block.initialize_weights()
+    if config.motion_use_gating:
+        ensure_motion_gate(visual, config)
+        logger.info("MOSS fusion: task-modality gated residual")
+    else:
+        visual.motion_gate = None
     logger.info(
         "Installed MotionModule at vision layer %s (d_hid=%s, window=%s, injection=%s)",
         config.motion_insert_layer,
@@ -302,17 +403,32 @@ def set_motion_trainable(visual: Any, tune_motion: bool, tune_visual: bool) -> N
             param.requires_grad = False
         for param in visual.motion_block.parameters():
             param.requires_grad = True
+        motion_gate = getattr(visual, "motion_gate", None)
+        if motion_gate is not None:
+            for param in motion_gate.parameters():
+                param.requires_grad = True
     else:
         for param in visual.motion_block.parameters():
             param.requires_grad = False
+        motion_gate = getattr(visual, "motion_gate", None)
+        if motion_gate is not None:
+            for param in motion_gate.parameters():
+                param.requires_grad = False
 
 
 def motion_state_dict_prefixes() -> tuple[str, ...]:
-    return ("motion_block.", "backbone.motion_block.", "model.visual.motion_block.")
+    return (
+        "motion_block.",
+        "motion_gate.",
+        "backbone.motion_block.",
+        "backbone.motion_gate.",
+        "model.visual.motion_block.",
+        "model.visual.motion_gate.",
+    )
 
 
 def is_motion_missing_key(key: str) -> bool:
-    return "motion_block" in key
+    return "motion_block" in key or "motion_gate" in key
 
 
 def motion_config_from_model_config(config: Any) -> MotionConfig:
@@ -334,4 +450,6 @@ def motion_config_from_model_config(config: Any) -> MotionConfig:
         motion_gradient_check=getattr(config, "motion_gradient_check", False),
         motion_int_mode=getattr(config, "motion_int_mode", "lite"),
         tune_motion=getattr(config, "tune_motion", True),
+        motion_use_gating=getattr(config, "motion_use_gating", True),
+        motion_gate_hidden=getattr(config, "motion_gate_hidden", 256),
     )

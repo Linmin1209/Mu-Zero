@@ -146,17 +146,16 @@ def build_visor_factored_action_head(base_cls: type):
             embodiment_id: torch.Tensor,
             *,
             gate_delta: torch.Tensor | None = None,
+            action_input=None,
+            action_mask=None,
         ) -> torch.Tensor:
-            batch_size, horizon, _ = hidden.shape
-            pred = hidden.new_zeros(batch_size, horizon, self.action_dim)
-            for seg in self.decoder_segments:
-                h_seg = hidden
-                if gate_delta is not None and seg.name in self.visor_gate_components:
-                    h_seg = hidden + gate_delta
-                pred[:, :, seg.start : seg.end] = self._decoder_for_segment(seg)(
-                    h_seg, embodiment_id
-                )
-            return pred
+            return super().decode_action_hidden(
+                hidden,
+                embodiment_id,
+                gate_delta=gate_delta,
+                action_input=action_input,
+                action_mask=action_mask,
+            )
 
         def set_trainable_parameters(
             self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool

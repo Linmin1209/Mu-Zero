@@ -143,6 +143,8 @@ if __name__ == "__main__":
     config.model.use_motion = ft_config.use_motion
     config.model.motion_insert_layer = ft_config.motion_insert_layer
     config.model.tune_motion = ft_config.tune_motion
+    config.model.motion_use_gating = ft_config.motion_use_gating
+    config.model.motion_gate_hidden = ft_config.motion_gate_hidden
     config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
     config.model.use_component_factored_head = ft_config.use_component_factored_head
     config.model.use_visor = ft_config.use_visor
@@ -220,7 +222,8 @@ if __name__ == "__main__":
     if ft_config.use_motion:
         print(
             f"[i] STSS/MOSS enabled at vision layer {ft_config.motion_insert_layer}; "
-            f"tune_motion={ft_config.tune_motion}"
+            f"tune_motion={ft_config.tune_motion}; "
+            f"motion_use_gating={ft_config.motion_use_gating}"
         )
     if ft_config.gradient_checkpointing is None:
         config.training.gradient_checkpointing = ft_config.use_motion

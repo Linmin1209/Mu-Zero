@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native GR00T N1.7 action head with per-component CategorySpecificMLP decoders."""
+"""Native GR00T N1.7 action head with shared flat decoder + per-component LoRA experts."""
 
 from __future__ import annotations
 
@@ -21,30 +21,47 @@ from gr00t.model.modules.component_action.component_layout import (
 from gr00t.model.modules.component_action.component_schema import (
     DEFAULT_COMPONENT_LOSS_WEIGHTS,
     ComponentSchemaConfig,
+    component_index,
 )
-from gr00t.model.modules.embodiment_conditioned_mlp import CategorySpecificMLP
+from gr00t.model.modules.embodiment_conditioned_mlp import (
+    CategorySpecificLinear,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-class _StateDictLinearView:
-    """Minimal adapter so CategorySpecificLinear.copy_ works from flat tensors."""
+class CategorySpecificLoRA(nn.Module):
+    """Low-rank per-embodiment adapter; zero-init B gives Day-0 identity on the residual path."""
 
-    def __init__(self, w: torch.Tensor, b: torch.Tensor):
-        self.W = w
-        self.b = b
+    def __init__(
+        self,
+        num_categories: int,
+        input_dim: int,
+        output_dim: int,
+        *,
+        rank: int = 8,
+        alpha: float = 8.0,
+    ):
+        super().__init__()
+        self.scaling = alpha / max(int(rank), 1)
+        self.lora_a = CategorySpecificLinear(num_categories, input_dim, rank)
+        self.lora_b = CategorySpecificLinear(num_categories, rank, output_dim)
+        nn.init.zeros_(self.lora_b.W)
+        nn.init.zeros_(self.lora_b.b)
+
+    def forward(self, x: torch.Tensor, cat_ids: torch.Tensor) -> torch.Tensor:
+        return self.lora_b(self.lora_a(x, cat_ids), cat_ids) * self.scaling
 
 
 def build_component_factored_action_head(base_cls: type):
     """Build ComponentFactoredActionHead without importing gr00t_n1d7 at module load time."""
 
     class ComponentFactoredActionHead(base_cls):
-        """AlternateVLDiT unchanged; flat action encoder; per-component decode MLPs."""
+        """AlternateVLDiT unchanged; shared flat decoder + sparse per-component LoRA."""
 
         def __init__(self, config: Gr00tN1d7Config):
             super().__init__(config)
-            del self.action_decoder
 
             override_dims = dict(getattr(config, "component_projector_dims", None) or {})
             loss_weights = dict(DEFAULT_COMPONENT_LOSS_WEIGHTS)
@@ -71,35 +88,79 @@ def build_component_factored_action_head(base_cls: type):
                     schema=self.schema,
                 )
             )
-            logger.info(
-                "ComponentFactoredActionHead: %d decoder segments, segments=%s",
-                len(self.decoder_segments),
-                [(s.name, s.start, s.end) for s in self.decoder_segments],
+            self.component_lora_rank = int(getattr(config, "component_lora_rank", 8))
+            self.component_lora_alpha = float(getattr(config, "component_lora_alpha", 8.0))
+            self.component_lora_train_shared_decoder = bool(
+                getattr(config, "component_lora_train_shared_decoder", False)
             )
 
-            self.component_decoders = nn.ModuleDict()
-            self.extra_decoders = nn.ModuleDict()
+            self.component_lora_adapters = nn.ModuleDict()
+            self.extra_lora_adapters = nn.ModuleDict()
             for seg in self.decoder_segments:
                 out_dim = seg.end - seg.start
-                decoder = CategorySpecificMLP(
-                    num_categories=config.max_num_embodiments,
-                    input_dim=self.hidden_size,
-                    hidden_dim=self.hidden_size,
-                    output_dim=out_dim,
+                adapter = CategorySpecificLoRA(
+                    config.max_num_embodiments,
+                    self.hidden_size,
+                    out_dim,
+                    rank=self.component_lora_rank,
+                    alpha=self.component_lora_alpha,
                 )
                 if seg.is_component:
-                    self.component_decoders[seg.name] = decoder
+                    self.component_lora_adapters[seg.name] = adapter
                 else:
-                    self.extra_decoders[seg.name] = decoder
+                    self.extra_lora_adapters[seg.name] = adapter
+
+            logger.info(
+                "ComponentFactoredActionHead: shared action_decoder + %d LoRA segments "
+                "(rank=%d alpha=%.1f train_shared_decoder=%s) segments=%s",
+                len(self.decoder_segments),
+                self.component_lora_rank,
+                self.component_lora_alpha,
+                self.component_lora_train_shared_decoder,
+                [(s.name, s.start, s.end) for s in self.decoder_segments],
+            )
 
             self.set_trainable_parameters(
                 config.tune_projector, config.tune_diffusion_model, config.tune_vlln
             )
 
-        def _decoder_for_segment(self, seg: ComponentDecoderSegment) -> CategorySpecificMLP:
+        def _lora_for_segment(self, seg: ComponentDecoderSegment) -> CategorySpecificLoRA:
             if seg.is_component:
-                return self.component_decoders[seg.name]
-            return self.extra_decoders[seg.name]
+                return self.component_lora_adapters[seg.name]
+            return self.extra_lora_adapters[seg.name]
+
+        def _segment_active_mask(
+            self,
+            *,
+            batch_size: int,
+            device: torch.device,
+            dtype: torch.dtype,
+            action_input: BatchFeature | None = None,
+            action_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            """Per-sample segment activity (B, num_segments); defaults to all active."""
+            num_segments = len(self.decoder_segments)
+            active = torch.ones(batch_size, num_segments, device=device, dtype=dtype)
+
+            component_mask = None
+            if action_input is not None:
+                if hasattr(action_input, "active_component_mask"):
+                    component_mask = action_input.active_component_mask
+                elif isinstance(action_input, dict) and "active_component_mask" in action_input:
+                    component_mask = action_input["active_component_mask"]
+
+            for seg_idx, seg in enumerate(self.decoder_segments):
+                if component_mask is not None and seg.is_component:
+                    try:
+                        comp_idx = component_index(seg.name)
+                    except ValueError:
+                        continue
+                    active[:, seg_idx] = (component_mask[:, comp_idx] > 0.5).to(dtype=dtype)
+                elif action_mask is not None:
+                    seg_mask = action_mask[:, :, seg.start : seg.end]
+                    active[:, seg_idx] = (seg_mask.sum(dim=(1, 2)) > 0).to(dtype=dtype)
+
+            return active
 
         def set_trainable_parameters(
             self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool
@@ -110,76 +171,94 @@ def build_component_factored_action_head(base_cls: type):
             for param in self.parameters():
                 param.requires_grad = True
             if not tune_projector:
-                self.state_encoder.requires_grad_(False)
-                self.action_encoder.requires_grad_(False)
-                self.component_decoders.requires_grad_(False)
-                self.extra_decoders.requires_grad_(False)
-                if self.config.add_pos_embed:
+                if hasattr(self, "state_encoder"):
+                    self.state_encoder.requires_grad_(False)
+                if hasattr(self, "action_encoder"):
+                    self.action_encoder.requires_grad_(False)
+                self.action_decoder.requires_grad_(False)
+                self.component_lora_adapters.requires_grad_(False)
+                self.extra_lora_adapters.requires_grad_(False)
+                if self.config.add_pos_embed and hasattr(self, "position_embedding"):
                     self.position_embedding.requires_grad_(False)
-            if not tune_diffusion_model:
+            elif not self.component_lora_train_shared_decoder:
+                self.action_decoder.requires_grad_(False)
+            if hasattr(self, "model") and not tune_diffusion_model:
                 self.model.requires_grad_(False)
-            if not tune_vlln:
+            if hasattr(self, "vlln") and not tune_vlln:
                 self.vlln.requires_grad_(False)
-                self.vl_self_attention.requires_grad_(False)
+                if hasattr(self, "vl_self_attention"):
+                    self.vl_self_attention.requires_grad_(False)
 
         def set_frozen_modules_to_eval_mode(self):
             if self.training:
                 if not self.tune_projector:
-                    self.state_encoder.eval()
-                    self.action_encoder.eval()
-                    self.component_decoders.eval()
-                    self.extra_decoders.eval()
-                    if self.config.add_pos_embed:
+                    if hasattr(self, "state_encoder"):
+                        self.state_encoder.eval()
+                    if hasattr(self, "action_encoder"):
+                        self.action_encoder.eval()
+                    self.action_decoder.eval()
+                    self.component_lora_adapters.eval()
+                    self.extra_lora_adapters.eval()
+                    if self.config.add_pos_embed and hasattr(self, "position_embedding"):
                         self.position_embedding.eval()
-                if not self.tune_diffusion_model:
+                elif not self.component_lora_train_shared_decoder:
+                    self.action_decoder.eval()
+                if hasattr(self, "model") and not self.tune_diffusion_model:
                     self.model.eval()
-                if not self.tune_vlln:
+                if hasattr(self, "vlln") and not self.tune_vlln:
                     self.vlln.eval()
-                    self.vl_self_attention.eval()
+                    if hasattr(self, "vl_self_attention"):
+                        self.vl_self_attention.eval()
 
         def decode_action_hidden(
-            self, hidden: torch.Tensor, embodiment_id: torch.Tensor
+            self,
+            hidden: torch.Tensor,
+            embodiment_id: torch.Tensor,
+            *,
+            gate_delta: torch.Tensor | None = None,
+            action_input: BatchFeature | None = None,
+            action_mask: torch.Tensor | None = None,
         ) -> torch.Tensor:
-            batch_size, horizon, _ = hidden.shape
-            pred = hidden.new_zeros(batch_size, horizon, self.action_dim)
-            for seg in self.decoder_segments:
-                pred[:, :, seg.start : seg.end] = self._decoder_for_segment(seg)(
-                    hidden, embodiment_id
+            batch_size, _, _ = hidden.shape
+            pred = self.action_decoder(hidden, embodiment_id)
+            active = self._segment_active_mask(
+                batch_size=batch_size,
+                device=hidden.device,
+                dtype=pred.dtype,
+                action_input=action_input,
+                action_mask=action_mask,
+            )
+
+            for seg_idx, seg in enumerate(self.decoder_segments):
+                h_seg = hidden
+                if gate_delta is not None and seg.name in getattr(
+                    self, "visor_gate_components", ()
+                ):
+                    h_seg = hidden + gate_delta
+                delta = self._lora_for_segment(seg)(h_seg, embodiment_id)
+                seg_active = active[:, seg_idx].view(batch_size, 1, 1)
+                pred[:, :, seg.start : seg.end] = pred[:, :, seg.start : seg.end] + (
+                    seg_active * delta
                 )
             return pred
-
-        @staticmethod
-        def _copy_category_linear(src: nn.Module, dst: nn.Module) -> None:
-            with torch.no_grad():
-                dst.W.copy_(src.W)
-                dst.b.copy_(src.b)
 
         def load_flat_decoder_into_component_decoders(
             self, flat_decoder_state: Mapping[str, torch.Tensor]
         ) -> None:
+            """Legacy hook: shared action_decoder loads from checkpoint; LoRA stays zero-init."""
             layer1_w = flat_decoder_state.get("layer1.W")
-            layer1_b = flat_decoder_state.get("layer1.b")
             layer2_w = flat_decoder_state.get("layer2.W")
-            layer2_b = flat_decoder_state.get("layer2.b")
             if layer1_w is None or layer2_w is None:
                 logger.warning(
-                    "Flat action_decoder weights missing; component decoders stay random."
+                    "Flat action_decoder weights missing in checkpoint slice; "
+                    "shared decoder may be randomly initialized."
                 )
-                return
-
-            for seg in self.decoder_segments:
-                decoder = self._decoder_for_segment(seg)
-                self._copy_category_linear(
-                    _StateDictLinearView(layer1_w, layer1_b),
-                    decoder.layer1,
+            else:
+                logger.info(
+                    "Shared action_decoder present in checkpoint; "
+                    "%d component LoRA adapters remain zero-init (Day-0 equivalent).",
+                    len(self.decoder_segments),
                 )
-                with torch.no_grad():
-                    decoder.layer2.W.copy_(layer2_w[:, :, seg.start : seg.end])
-                    decoder.layer2.b.copy_(layer2_b[:, seg.start : seg.end])
-            logger.info(
-                "Initialized %d component/extra decoders from pretrained flat action_decoder.",
-                len(self.decoder_segments),
-            )
 
         def forward(self, backbone_output, action_input):
             self.set_frozen_modules_to_eval_mode()
@@ -239,9 +318,14 @@ def build_component_factored_action_head(base_cls: type):
                 )
 
             hidden = model_output[:, -actions.shape[1] :]
-            pred_actions = self.decode_action_hidden(hidden, embodiment_id)
-
             action_mask = action_input.action_mask
+            pred_actions = self.decode_action_hidden(
+                hidden,
+                embodiment_id,
+                action_input=action_input,
+                action_mask=action_mask,
+            )
+
             per_elem_loss = F.mse_loss(pred_actions, velocity, reduction="none")
             scaled_mask = action_mask.clone()
             for seg in self.decoder_segments:
@@ -299,7 +383,6 @@ def build_component_factored_action_head(base_cls: type):
                 vel_strength[
                     :,
                     options["rtc_frozen_steps"] : options["rtc_overlap_steps"],
-                    :,
                 ] = ramp[None, :, None].to(device)
 
             for step in range(self.num_inference_timesteps):
@@ -333,7 +416,11 @@ def build_component_factored_action_head(base_cls: type):
                     )
 
                 hidden = model_output[:, -self.action_horizon :]
-                pred_velocity = self.decode_action_hidden(hidden, embodiment_id)
+                pred_velocity = self.decode_action_hidden(
+                    hidden,
+                    embodiment_id,
+                    action_input=action_input,
+                )
                 actions = actions + dt * pred_velocity * vel_strength
 
             return BatchFeature(

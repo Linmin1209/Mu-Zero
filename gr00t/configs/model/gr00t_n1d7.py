@@ -61,6 +61,8 @@ class Gr00tN1d7Config(PretrainedConfig):
     motion_gradient_check: bool = False
     motion_int_mode: str = "lite"
     tune_motion: bool = True
+    motion_use_gating: bool = True
+    motion_gate_hidden: int = 256
     select_layer: int = 12
     reproject_vision: bool = False
     use_flash_attention: bool = True
