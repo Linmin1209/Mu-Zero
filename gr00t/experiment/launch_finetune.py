@@ -154,6 +154,11 @@ if __name__ == "__main__":
     config.model.visor_vq_commit_weight = ft_config.visor_vq_commit_weight
     config.model.visor_use_contact_rate_prior = ft_config.visor_use_contact_rate_prior
     config.model.visor_use_semantic_gate = ft_config.visor_use_semantic_gate
+    config.model.visor_use_split_action_gates = ft_config.visor_use_split_action_gates
+    config.model.visor_arm_action_slice = ft_config.visor_arm_action_slice
+    config.model.visor_hand_action_slice = ft_config.visor_hand_action_slice
+    config.model.visor_arm_action_dim = ft_config.visor_arm_action_dim
+    config.model.visor_hand_action_dim = ft_config.visor_hand_action_dim
     config.model.visor_tactile_warmup_steps = ft_config.visor_tactile_warmup_steps
     config.model.visor_loss_weight_tactile = ft_config.visor_loss_weight_tactile
     config.model.visor_contact_loss_weight = ft_config.visor_contact_loss_weight

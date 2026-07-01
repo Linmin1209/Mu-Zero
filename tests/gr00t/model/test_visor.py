@@ -92,3 +92,66 @@ def test_resolve_sensor_tactile_requires_input():
         raise AssertionError("expected ValueError")
     except ValueError as exc:
         assert "VISOR requires" in str(exc)
+
+
+def test_build_split_action_gates_shapes_and_late_only():
+    visor = VisorModule(
+        input_embedding_dim=16,
+        action_horizon=4,
+        vision_dim=12,
+        decode_hidden_dim=20,
+        flow_tau_split=0.4,
+        history_vq_tokens=2,
+        use_split_action_gates=True,
+        arm_action_dim=6,
+        hand_action_dim=1,
+    )
+    tactile = torch.randn(2, 4, 3)
+    coupling = torch.ones(2, 1)
+    t_early = torch.tensor([[0.1], [0.2]])
+    t_late = torch.tensor([[0.5], [0.9]])
+
+    arm_early, hand_early = visor.build_split_action_gates(
+        tactile, flow_time=t_early, coupling_lambda=coupling
+    )
+    arm_late, hand_late = visor.build_split_action_gates(
+        tactile, flow_time=t_late, coupling_lambda=coupling
+    )
+
+    assert arm_early.shape == (2, 1, 6)
+    assert hand_early.shape == (2, 1, 1)
+    assert torch.allclose(arm_early, torch.zeros_like(arm_early))
+    assert torch.allclose(hand_early, torch.zeros_like(hand_early))
+    # Zero-init projections → late segment still zero until training moves weights.
+    assert arm_late.shape == (2, 1, 6)
+    assert hand_late.shape == (2, 1, 1)
+
+    visor.gate.data.fill_(1.0)
+    with torch.no_grad():
+        visor.arm_gate_proj.weight.fill_(0.1)
+        visor.hand_gate_proj.weight.fill_(0.1)
+    arm_late, hand_late = visor.build_split_action_gates(
+        tactile, flow_time=t_late, coupling_lambda=coupling
+    )
+    assert not torch.allclose(arm_late, torch.zeros_like(arm_late))
+    assert not torch.allclose(hand_late, torch.zeros_like(hand_late))
+
+
+def test_build_split_action_gates_requires_flag():
+    visor = VisorModule(
+        input_embedding_dim=16,
+        action_horizon=4,
+        vision_dim=12,
+        decode_hidden_dim=20,
+        use_split_action_gates=False,
+    )
+    tactile = torch.randn(2, 4, 3)
+    try:
+        visor.build_split_action_gates(
+            tactile,
+            flow_time=torch.tensor([[0.9], [0.8]]),
+            coupling_lambda=torch.ones(2, 1),
+        )
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "use_split_action_gates=True" in str(exc)

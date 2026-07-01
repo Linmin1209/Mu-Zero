@@ -164,6 +164,14 @@ class Gr00tN1d7Config(PretrainedConfig):
     visor_use_contact_rate_prior: bool = True
     visor_use_semantic_gate: bool = True
     visor_gate_components: tuple[str, ...] = ("right_hand",)
+    visor_use_split_action_gates: bool = True
+    """Flat VISOR: separate tactile gates for arm (EEF) and gripper action dims."""
+    visor_arm_action_slice: tuple[int, int] = (1, 7)
+    """Flat action indices [start, end) for EEF pos+rot (RoboCasa365 layout)."""
+    visor_hand_action_slice: tuple[int, int] = (0, 1)
+    """Flat action indices [start, end) for gripper_close."""
+    visor_arm_action_dim: int = 6
+    visor_hand_action_dim: int = 1
     visor_tactile_warmup_steps: int = 1000
     visor_detach_tactile_for_gate: bool = True
     visor_iht_tokens: int = 2

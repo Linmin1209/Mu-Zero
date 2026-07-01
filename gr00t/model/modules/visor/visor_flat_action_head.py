@@ -37,6 +37,10 @@ def build_visor_flat_action_head(base_cls: type):
             self.register_buffer(
                 "_visor_train_step", torch.zeros((), dtype=torch.long), persistent=False
             )
+            arm_slice = getattr(config, "visor_arm_action_slice", (1, 7))
+            hand_slice = getattr(config, "visor_hand_action_slice", (0, 1))
+            self.visor_arm_slice = (int(arm_slice[0]), int(arm_slice[1]))
+            self.visor_hand_slice = (int(hand_slice[0]), int(hand_slice[1]))
 
             self.visor = VisorModule(
                 input_embedding_dim=self.input_embedding_dim,
@@ -57,14 +61,21 @@ def build_visor_flat_action_head(base_cls: type):
                 ),
                 use_semantic_gate=bool(getattr(config, "visor_use_semantic_gate", True)),
                 language_dim=config.backbone_embedding_dim,
+                use_split_action_gates=bool(
+                    getattr(config, "visor_use_split_action_gates", True)
+                ),
+                arm_action_dim=int(getattr(config, "visor_arm_action_dim", 6)),
+                hand_action_dim=int(getattr(config, "visor_hand_action_dim", 1)),
             )
             logger.info(
                 "VisorFlatActionHead (T-Rex sensor): tau_split=%.2f iht_tokens=%d "
-                "tactile_weight=%.3f warmup=%d",
+                "tactile_weight=%.3f warmup=%d split_gates=arm%s hand%s",
                 self.visor.flow_tau_split,
                 self.visor.iht_tokens,
                 self.visor.loss_weight_tactile,
                 self.visor_tactile_warmup_steps,
+                self.visor_arm_slice,
+                self.visor_hand_slice,
             )
             self.set_trainable_parameters(
                 config.tune_projector, config.tune_diffusion_model, config.tune_vlln
@@ -160,11 +171,33 @@ def build_visor_flat_action_head(base_cls: type):
             hidden: torch.Tensor,
             embodiment_id: torch.Tensor,
             *,
-            gate_delta: torch.Tensor | None = None,
+            arm_gate: torch.Tensor | None = None,
+            hand_gate: torch.Tensor | None = None,
         ) -> torch.Tensor:
-            if gate_delta is not None:
-                hidden = hidden + gate_delta
-            return self.action_decoder(hidden, embodiment_id)
+            pred = self.action_decoder(hidden, embodiment_id)
+            if arm_gate is not None:
+                arm_start, arm_end = self.visor_arm_slice
+                pred[..., arm_start:arm_end] = pred[..., arm_start:arm_end] + arm_gate
+            if hand_gate is not None:
+                hand_start, hand_end = self.visor_hand_slice
+                pred[..., hand_start:hand_end] = pred[..., hand_start:hand_end] + hand_gate
+            return pred
+
+        def _build_action_gates(
+            self,
+            tactile_seq: torch.Tensor,
+            *,
+            flow_time: torch.Tensor,
+            coupling_lambda: torch.Tensor,
+            coupling_scale: float,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return self.visor.build_split_action_gates(
+                tactile_seq,
+                flow_time=flow_time,
+                coupling_lambda=coupling_lambda,
+                coupling_scale=coupling_scale,
+                detach_tactile=self.visor_detach_tactile_for_gate,
+            )
 
         def forward(self, backbone_output, action_input):
             self.set_frozen_modules_to_eval_mode()
@@ -238,15 +271,14 @@ def build_visor_flat_action_head(base_cls: type):
             )
 
             hidden_action = model_output[:, 1 : 1 + self.action_horizon]
-            gate_delta = self.visor.build_gate_delta(
+            arm_gate, hand_gate = self._build_action_gates(
                 tactile_seq,
                 flow_time=t,
                 coupling_lambda=coupling_lambda,
                 coupling_scale=coupling_scale,
-                detach_tactile=self.visor_detach_tactile_for_gate,
             )
             pred_actions = self.decode_action_hidden(
-                hidden_action, embodiment_id, gate_delta=gate_delta
+                hidden_action, embodiment_id, arm_gate=arm_gate, hand_gate=hand_gate
             )
 
             action_mask = action_input.action_mask
@@ -340,7 +372,8 @@ def build_visor_flat_action_head(base_cls: type):
                     pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
                     action_features = action_features + pos_embs
 
-                gate_delta = None
+                arm_gate = None
+                hand_gate = None
                 if use_visor:
                     tactile_seq = tactile_seq_base
                     iht_tokens, _ = self.visor.build_iht_tokens(
@@ -354,12 +387,11 @@ def build_visor_flat_action_head(base_cls: type):
                         tactile_pred=tactile_seq,
                     )
                     sa_embs = torch.cat((state_features, action_features, iht_tokens), dim=1)
-                    gate_delta = self.visor.build_gate_delta(
+                    arm_gate, hand_gate = self._build_action_gates(
                         tactile_seq,
                         flow_time=t_broadcast,
                         coupling_lambda=coupling_lambda,
                         coupling_scale=1.0,
-                        detach_tactile=self.visor_detach_tactile_for_gate,
                     )
                 else:
                     sa_embs = torch.cat((state_features, action_features), dim=1)
@@ -374,7 +406,7 @@ def build_visor_flat_action_head(base_cls: type):
                 )
                 hidden_action = model_output[:, 1 : 1 + self.action_horizon]
                 pred_velocity = self.decode_action_hidden(
-                    hidden_action, embodiment_id, gate_delta=gate_delta
+                    hidden_action, embodiment_id, arm_gate=arm_gate, hand_gate=hand_gate
                 )
                 dt = 1.0 / num_steps
                 actions = actions + dt * pred_velocity

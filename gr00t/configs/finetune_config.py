@@ -105,6 +105,11 @@ class FinetuneConfig:
     visor_vq_commit_weight: float = 0.1
     visor_use_contact_rate_prior: bool = True
     visor_use_semantic_gate: bool = True
+    visor_use_split_action_gates: bool = True
+    visor_arm_action_slice: tuple[int, int] = (1, 7)
+    visor_hand_action_slice: tuple[int, int] = (0, 1)
+    visor_arm_action_dim: int = 6
+    visor_hand_action_dim: int = 1
     visor_tactile_warmup_steps: int = 1000
 
     visor_loss_weight_tactile: float = 0.1

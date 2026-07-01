@@ -2,8 +2,8 @@
 # Finetune GR00T N1.7 on all RoboCasa365 pretrain tasks (atomic + composite).
 # Default: flat VISOR + MOSS (no component-factored head — better for multitask pretrain).
 #
-# Defaults: 120k steps, global batch 64, 8 GPUs (per-GPU batch 8).
-# Effective sample budget: 120000 × 64 = 7,680,000 samples.
+# Defaults: 120k steps, global batch 128, 8 GPUs (per-GPU batch 16).
+# Effective sample budget: 120000 × 128 = 15,360,000 samples.
 # Checkpoints saved every 10k steps (SAVE_STEPS=10000).
 #
 # Prerequisites for VISOR (once per machine / dataset refresh):
@@ -20,7 +20,7 @@
 #   NUM_SHARDS_PER_EPOCH, SHARD_SIZE, SAVE_STEPS, ROBOCASA365_TASKS,
 #   USE_VISOR, USE_VISOR_COMPONENT_FACTORED, USE_MOTION, ...
 #
-# VISOR on flat head (default): --use-visor only
+# VISOR on flat head (default): --use-visor only; Scheme B split gates (arm EEF + gripper) enabled by default
 # VISOR + component-factored (single-task): USE_VISOR_COMPONENT_FACTORED=1
 #
 # Disable VISOR or MOSS:
@@ -54,11 +54,11 @@ else
 fi
 
 if [[ "$USE_VISOR" == "1" && "$USE_MOTION" == "1" ]]; then
-  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_visor_flat_moss_b64_4frame_8gpu}"
+  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_visor_flat_moss_b128_4frame_8gpu}"
 elif [[ "$USE_VISOR" == "1" ]]; then
-  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_visor_b64_4frame_8gpu}"
+  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_visor_b128_4frame_8gpu}"
 elif [[ "$USE_MOTION" == "1" ]]; then
-  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_moss_b64_4frame_8gpu}"
+  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_moss_b128_4frame_8gpu}"
 else
   OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_vanilla_b128_8gpu}"
 fi
@@ -68,11 +68,7 @@ NUM_GPUS="${NUM_GPUS:-8}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MAX_STEPS="${MAX_STEPS:-120000}"
-if [[ "$USE_VISOR" == "1" || "$USE_MOTION" == "1" ]]; then
-  GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-else
-  GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
-fi
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
 SAVE_STEPS="${SAVE_STEPS:-10000}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-13}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-2}"

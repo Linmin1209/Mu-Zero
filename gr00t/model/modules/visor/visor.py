@@ -210,6 +210,9 @@ class VisorModule(nn.Module):
         use_contact_rate_prior: bool = True,
         use_semantic_gate: bool = True,
         language_dim: int | None = None,
+        use_split_action_gates: bool = False,
+        arm_action_dim: int = 6,
+        hand_action_dim: int = 1,
         # Legacy alias; ignored when tri-path encoder is active.
         iht_tokens: int | None = None,
     ):
@@ -234,9 +237,22 @@ class VisorModule(nn.Module):
         self.iht_tokens = self.tri_path.num_iht_tokens
         self.native_seq_len = 1 + action_horizon
 
+        self.use_split_action_gates = use_split_action_gates
+        self.arm_action_dim = arm_action_dim
+        self.hand_action_dim = hand_action_dim
+
         self.gate = nn.Parameter(torch.zeros(1))
         self.gate_proj = nn.Linear(3, decode_hidden_dim)
         _zero_init_linear(self.gate_proj)
+        if use_split_action_gates:
+            # Scheme B: arm uses force vector; hand uses contact scalar only.
+            self.arm_gate_proj = nn.Linear(3, arm_action_dim)
+            self.hand_gate_proj = nn.Linear(1, hand_action_dim)
+            _zero_init_linear(self.arm_gate_proj)
+            _zero_init_linear(self.hand_gate_proj)
+        else:
+            self.arm_gate_proj = None
+            self.hand_gate_proj = None
         self.semantic_gate_proj = nn.Linear(lang_dim, 1)
         _zero_init_linear(self.semantic_gate_proj)
 
@@ -304,6 +320,32 @@ class VisorModule(nn.Module):
             * self.gate_proj(event).unsqueeze(1)
         )
         return gate
+
+    def build_split_action_gates(
+        self,
+        tactile_pred: torch.Tensor,
+        *,
+        flow_time: torch.Tensor,
+        coupling_lambda: torch.Tensor,
+        coupling_scale: float = 1.0,
+        detach_tactile: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-part action-space gates for flat decoder (arm EEF + gripper)."""
+        if not self.use_split_action_gates:
+            raise RuntimeError("build_split_action_gates requires use_split_action_gates=True")
+        active = self.refine_active(flow_time).to(dtype=tactile_pred.dtype)
+        event_source = tactile_pred.detach() if detach_tactile else tactile_pred
+        event = self.tri_path.gate_event(event_source)
+        scale = (
+            active.view(-1, 1, 1)
+            * coupling_scale
+            * coupling_lambda.view(-1, 1, 1).to(dtype=event.dtype)
+            * self.gate
+        )
+        arm_gate = scale * self.arm_gate_proj(event).unsqueeze(1)
+        hand_event = event[:, 2:3]
+        hand_gate = scale * self.hand_gate_proj(hand_event).unsqueeze(1)
+        return arm_gate, hand_gate
 
     def modulate_action_hidden(
         self,
