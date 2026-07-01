@@ -23,6 +23,7 @@ from gr00t.model.modules.qwen3_motion import (
     MotionConfig,
     install_motion_module,
     pool_motion_gate_text_context,
+    resolve_motion_text_hidden_size,
     set_motion_trainable,
 )
 
@@ -173,7 +174,12 @@ class Qwen3Backbone(torch.nn.Module):
         self.motion_config = motion_config
         self.tune_motion = tune_motion
         if motion_config is not None and motion_config.use_motion:
-            install_motion_module(self.model.visual, motion_config)
+            text_hidden_size = resolve_motion_text_hidden_size(self.model)
+            install_motion_module(
+                self.model.visual,
+                motion_config,
+                text_hidden_size=text_hidden_size,
+            )
             self._convert_motion_bn_to_float()
 
         self.select_layer = select_layer

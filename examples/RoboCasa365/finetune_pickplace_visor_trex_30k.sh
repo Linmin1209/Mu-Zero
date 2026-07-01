@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Finetune GR00T N1.7 on RoboCasa365 DeliverStraw (30k steps)
-# with component-factored decoders + VISOR suffix IHT + tactile auxiliary loss.
+# Finetune GR00T N1.7 on RoboCasa365 PickPlaceToasterToCounter (30k steps)
+# T-Rex-style sensor VISOR: tri-path VQ tactile + flow-late refine (no WWM/imagine).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,10 +9,10 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/env_defaults.sh"
 
 ROBOCASA365_SPLIT="${ROBOCASA365_SPLIT:-pretrain}"
-ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-composite}"
-ROBOCASA365_TASKS="${ROBOCASA365_TASKS:-DeliverStraw}"
+ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-atomic}"
+ROBOCASA365_TASKS="${ROBOCASA365_TASKS:-PickPlaceToasterToCounter}"
 MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config_4frame.py}"
-OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_DeliverStraw_30k_b64_4frame_visor}"
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_PickPlaceToasterToCounter_30k_b64_4frame_visor_trex}"
 LOG_FILE="${LOG_FILE:-$OUTPUT_DIR/train.log}"
 
 NUM_GPUS="${NUM_GPUS:-1}"
@@ -35,8 +35,8 @@ echo "[i] dataset: $ROBOCASA365_ROOT"
 echo "[i] base model: $GR00T_BASE_MODEL"
 echo "[i] Task: $ROBOCASA365_TASKS"
 echo "[i] Split/category: $ROBOCASA365_SPLIT / $ROBOCASA365_CATEGORY"
-echo "[i] modality config: $MODALITY_CONFIG (video delta [-6,-4,-2,0], tactile horizon 40)"
-echo "[i] use_component_factored_head=True use_visor=True (T-Rex sensor-only)"
+echo "[i] modality config: $MODALITY_CONFIG (tactile + tactile_future required)"
+echo "[i] use_component_factored_head=True use_visor=True (T-Rex sensor-only, no WWM)"
 echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION"
 echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
 echo "[i] output: $OUTPUT_DIR"

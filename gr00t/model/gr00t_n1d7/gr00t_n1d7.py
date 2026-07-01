@@ -553,15 +553,26 @@ class Gr00tN1d7(PreTrainedModel):
             self.action_head = AdaptiveEmbodimentActionHead(config)
             logger.info("Using AdaptiveEmbodimentActionHead (component-level MSAT decoder)")
         elif getattr(config, "use_visor", False):
-            from gr00t.model.modules.visor.visor_factored_action_head import (
-                build_visor_factored_action_head,
-            )
+            if getattr(config, "use_component_factored_head", False):
+                from gr00t.model.modules.visor.visor_factored_action_head import (
+                    build_visor_factored_action_head,
+                )
 
-            self.action_head = build_visor_factored_action_head(Gr00tN1d7ActionHead)(config)
-            logger.info(
-                "Using VisorFactoredActionHead "
-                "(component-factored decode + flow-late tri-path VISOR refine)"
-            )
+                self.action_head = build_visor_factored_action_head(Gr00tN1d7ActionHead)(config)
+                logger.info(
+                    "Using VisorFactoredActionHead "
+                    "(component-factored decode + flow-late tri-path VISOR refine)"
+                )
+            else:
+                from gr00t.model.modules.visor.visor_flat_action_head import (
+                    build_visor_flat_action_head,
+                )
+
+                self.action_head = build_visor_flat_action_head(Gr00tN1d7ActionHead)(config)
+                logger.info(
+                    "Using VisorFlatActionHead "
+                    "(native flat decode + flow-late tri-path VISOR refine)"
+                )
         elif getattr(config, "use_component_factored_head", False):
             from gr00t.model.modules.component_action.component_factored_action_head import (
                 build_component_factored_action_head,

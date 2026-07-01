@@ -4,7 +4,7 @@ from gr00t.model.modules.visor.visor import (
     VisorModule,
     align_tactile_horizon,
     build_asymmetric_sa_mask,
-    normalize_visor_tactile_mode,
+    resolve_sensor_tactile,
 )
 
 __all__ = [
@@ -13,5 +13,5 @@ __all__ = [
     "VisorModule",
     "align_tactile_horizon",
     "build_asymmetric_sa_mask",
-    "normalize_visor_tactile_mode",
+    "resolve_sensor_tactile",
 ]

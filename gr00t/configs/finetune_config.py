@@ -93,13 +93,7 @@ class FinetuneConfig:
     """If True, keep native AlternateVLDiT and use per-component CategorySpecificMLP decoders."""
 
     use_visor: bool = False
-    """If True, enable VISOR flow-late tri-path IHT + tactile auxiliary loss."""
-
-    visor_tactile_mode: str = "imagine"
-    """VISOR tactile source: imagine (WWM), sensor (real tactile encoding), or hybrid."""
-
-    visor_train_wwm: bool = True
-    """If True, supervise WWM with tactile_gt (future chunk from tactile_future modality)."""
+    """If True, enable T-Rex-style sensor VISOR. Uses flat head unless component_factored is set."""
 
     visor_flow_tau_split: float = 0.4
     """VISOR activates when flow time t >= this split (GR00T: 0=noise, 1=clean)."""

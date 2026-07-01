@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import torch
 
-from gr00t.model.modules.visor.visor import TriPathTactileEncoder, VisorModule, build_asymmetric_sa_mask
+from gr00t.model.modules.visor.visor import (
+    TriPathTactileEncoder,
+    VisorModule,
+    build_asymmetric_sa_mask,
+    resolve_sensor_tactile,
+)
 
 
 def test_refine_active_only_on_late_flow_segment():
     visor = VisorModule(
-        action_dim=8,
-        hidden_dim=32,
         input_embedding_dim=16,
         action_horizon=4,
         vision_dim=12,
-        proprio_dim=6,
         decode_hidden_dim=20,
         flow_tau_split=0.4,
         history_vq_tokens=2,
@@ -44,3 +46,49 @@ def test_asymmetric_mask_blocks_native_to_iht():
     mask = build_asymmetric_sa_mask(5, 4, device=torch.device("cpu"), dtype=torch.float32)
     assert torch.isinf(mask[0, :5, 5:]).all()
     assert torch.all(mask[0, 5:, :5] == 0)
+
+
+def test_resolve_sensor_tactile_prefers_gt_in_training():
+    gt = torch.ones(2, 40, 3)
+    sensor = torch.zeros(2, 4, 3)
+    seq = resolve_sensor_tactile(
+        tactile_sensor=sensor,
+        tactile_gt=gt,
+        action_horizon=40,
+        training=True,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    assert seq.shape == (2, 40, 3)
+    assert seq[0, 0, 0] == 1.0
+
+
+def test_resolve_sensor_tactile_uses_sensor_at_eval():
+    gt = torch.ones(2, 40, 3)
+    sensor = torch.full((2, 4, 3), 2.0)
+    seq = resolve_sensor_tactile(
+        tactile_sensor=sensor,
+        tactile_gt=gt,
+        action_horizon=40,
+        training=False,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    assert seq.shape == (2, 40, 3)
+    assert seq[0, 3, 0] == 2.0  # last real sensor frame
+    assert seq[0, -1, 0] == 0.0  # zero-padded tail
+
+
+def test_resolve_sensor_tactile_requires_input():
+    try:
+        resolve_sensor_tactile(
+            tactile_sensor=None,
+            tactile_gt=None,
+            action_horizon=40,
+            training=False,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "VISOR requires" in str(exc)

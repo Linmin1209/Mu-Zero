@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline VISOR tactile (gripper force + contact) prediction validation."""
+"""Offline T-Rex sensor VISOR tactile validation (real tactile, no WWM)."""
 
 from __future__ import annotations
 
@@ -123,35 +123,29 @@ def plot_sample(
     steps = np.arange(gt.shape[0])
     ax_l = fig.add_subplot(gs[1, 0])
     ax_l.plot(steps, gt[:, 0], label="GT left", linewidth=2)
-    ax_l.plot(steps, pred_clean[:, 0], "--", label="pred left (clean WWM)", linewidth=2)
+    ax_l.plot(steps, pred_clean[:, 0], "--", label="sensor left (IHT input)", linewidth=2)
     ax_l.set_title("Left force (N)")
     ax_l.legend()
     ax_l.grid(True, alpha=0.3)
 
     ax_r = fig.add_subplot(gs[1, 1])
     ax_r.plot(steps, gt[:, 1], label="GT right", linewidth=2)
-    ax_r.plot(steps, pred_clean[:, 1], "--", label="pred right (clean WWM)", linewidth=2)
+    ax_r.plot(steps, pred_clean[:, 1], "--", label="sensor right (IHT input)", linewidth=2)
     ax_r.set_title("Right force (N)")
     ax_r.legend()
     ax_r.grid(True, alpha=0.3)
 
     ax_c = fig.add_subplot(gs[2, 0])
     ax_c.plot(steps, gt[:, 2], label="GT contact", linewidth=2)
-    ax_c.plot(steps, 1 / (1 + np.exp(-pred_clean[:, 2])), "--", label="pred contact (clean WWM)", linewidth=2)
+    ax_c.plot(steps, 1 / (1 + np.exp(-pred_clean[:, 2])), "--", label="sensor contact (IHT input)", linewidth=2)
     ax_c.set_title("Contact probability")
     ax_c.set_ylim(-0.05, 1.05)
     ax_c.legend()
     ax_c.grid(True, alpha=0.3)
 
     ax_f = fig.add_subplot(gs[2, 1])
-    ax_f.plot(steps, gt[:, 2], label="GT contact", linewidth=2)
-    for t_val, arr in pred_flow.items():
-        prob = 1 / (1 + np.exp(-arr[:, 2]))
-        ax_f.plot(steps, prob, "--", label=f"WWM contact @ t={t_val:.1f}")
-    ax_f.set_title("WWM contact vs flow time")
-    ax_f.set_ylim(-0.05, 1.05)
-    ax_f.legend(fontsize=8)
-    ax_f.grid(True, alpha=0.3)
+    ax_f.set_title("Sensor contact (eval path: 4-frame history padded)")
+    ax_f.axis("off")
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,48 +154,23 @@ def plot_sample(
 
 
 @torch.no_grad()
-def predict_tactile(
-    model,
-    processor,
-    batch_inputs: dict,
-    flow_time: float,
-    *,
-    use_clean_action: bool,
-) -> torch.Tensor:
-    device = model.device
-    dtype = model.dtype
-    inputs = {k: v for k, v in batch_inputs.items()}
-    if "vlm_content" in inputs:
-        prep = processor.collator([{"vlm_content": inputs.pop("vlm_content")}])["inputs"]
-        inputs.update(prep)
-    for k, v in list(inputs.items()):
-        if torch.is_tensor(v):
-            inputs[k] = v.to(device=device, dtype=dtype if v.is_floating_point() else None)
-        elif isinstance(v, dict):
-            inputs[k] = {
-                sk: sv.to(device=device, dtype=dtype if sv.is_floating_point() else None)
-                for sk, sv in v.items()
-            }
+def resolve_batch_tactile(batch_inputs: dict, *, action_horizon: int, training: bool) -> torch.Tensor:
+    from gr00t.model.modules.visor.visor import resolve_sensor_tactile
 
-    backbone_inputs, action_inputs = model.prepare_input(inputs)
-    backbone_outputs = model.backbone(backbone_inputs)
-    backbone_outputs = model.action_head.process_backbone_output(backbone_outputs)
-
-    vl_embeds = backbone_outputs.backbone_features
-    vision_context = model.action_head.visor.pool_vision_context(
-        vl_embeds, backbone_outputs.image_mask
+    sensor = batch_inputs.get("tactile_sensor")
+    gt = batch_inputs.get("tactile_gt")
+    ref = sensor if sensor is not None else gt
+    if ref is None:
+        raise ValueError("Batch missing tactile_sensor/tactile_gt")
+    seq = resolve_sensor_tactile(
+        tactile_sensor=sensor,
+        tactile_gt=gt,
+        action_horizon=action_horizon,
+        training=training,
+        device=ref.device,
+        dtype=ref.dtype,
     )
-    proprio = action_inputs.state.reshape(action_inputs.state.shape[0], -1)
-    actions = action_inputs.action
-    t = torch.full((actions.shape[0], 1, 1), flow_time, device=device, dtype=actions.dtype)
-    tactile_pred = model.action_head.visor.wwm(
-        actions,
-        t,
-        vision_context,
-        proprio,
-        use_clean_action=use_clean_action,
-    )
-    return tactile_pred[0]
+    return seq[0]
 
 
 def build_batch(processor, loader, ep: int, step: int, embodiment_tag: EmbodimentTag):
@@ -270,24 +239,23 @@ def main() -> None:
 
         batch, data = build_batch(processor, loader, ep, step, embodiment_tag)
         tactile_gt = batch["tactile_gt"][0].float()
+        action_horizon = tactile_gt.shape[0]
 
-        pred_clean = predict_tactile(model, processor, batch, 1.0, use_clean_action=True)
-        pred_flow = {}
-        for t_val in (0.0, 0.5, 1.0):
-            pred_flow[t_val] = predict_tactile(
-                model, processor, batch, t_val, use_clean_action=False
-            ).float().cpu().numpy()
+        pred_eval = resolve_batch_tactile(
+            batch, action_horizon=action_horizon, training=False
+        ).float()
+        pred_train = resolve_batch_tactile(
+            batch, action_horizon=action_horizon, training=True
+        ).float()
 
-        metrics = compute_metrics(pred_clean, tactile_gt)
+        metrics = compute_metrics(pred_eval, tactile_gt)
         gate_mod_norm = float(
             (model.action_head.visor.gate * model.action_head.visor.gate_proj(
-                pred_clean.mean(dim=0, keepdim=True)
+                pred_eval.mean(dim=0, keepdim=True)
             )).norm().detach().cpu()
         )
-        loss, loss_stats = model.action_head.visor.compute_tactile_loss(
-            pred_clean.unsqueeze(0),
-            tactile_gt.unsqueeze(0).to(device=pred_clean.device, dtype=pred_clean.dtype),
-        )
+        loss = torch.tensor(0.0)
+        loss_stats = {"lambda_eff": torch.tensor(1.0)}
 
         eye_image = None
         if "robot0_eye_in_hand" in data.images:
@@ -302,8 +270,8 @@ def main() -> None:
             tag=tag,
             metrics=metrics,
             gt=tactile_gt.numpy(),
-            pred_clean=pred_clean.float().cpu().numpy(),
-            pred_flow=pred_flow,
+            pred_clean=pred_eval.cpu().numpy(),
+            pred_flow={},
             eye_image=eye_image,
         )
 
@@ -314,7 +282,7 @@ def main() -> None:
             "gate": gate,
             "gate_mod_norm": gate_mod_norm,
             "tactile_loss": float(loss.detach().cpu()),
-            "lambda_eff": float(loss_stats["lambda_eff"].detach().cpu()),
+            "train_sensor_matches_gt": float(torch.allclose(pred_train, tactile_gt, atol=1e-5)),
             **metrics,
             "plot": str(plot_path),
         }

@@ -148,8 +148,6 @@ if __name__ == "__main__":
     config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
     config.model.use_component_factored_head = ft_config.use_component_factored_head
     config.model.use_visor = ft_config.use_visor
-    config.model.visor_tactile_mode = ft_config.visor_tactile_mode
-    config.model.visor_train_wwm = ft_config.visor_train_wwm
     config.model.visor_flow_tau_split = ft_config.visor_flow_tau_split
     config.model.visor_history_vq_tokens = ft_config.visor_history_vq_tokens
     config.model.visor_vq_codebook_size = ft_config.visor_vq_codebook_size
@@ -163,8 +161,8 @@ if __name__ == "__main__":
         raise ValueError(
             "Choose at most one of --use-adaptive-component-head and --use-component-factored-head."
         )
-    if ft_config.use_visor and not ft_config.use_component_factored_head:
-        raise ValueError("--use-visor requires --use-component-factored-head.")
+    if ft_config.use_visor and ft_config.use_adaptive_component_head:
+        raise ValueError("--use-visor is incompatible with --use-adaptive-component-head.")
     if ft_config.use_adaptive_component_head:
         component_dims = None
         if ft_config.modality_config_path:
@@ -212,9 +210,13 @@ if __name__ == "__main__":
             "(native AlternateVLDiT + per-component CategorySpecificMLP decoders)"
         )
     if ft_config.use_visor:
+        head_mode = (
+            "component-factored"
+            if ft_config.use_component_factored_head
+            else "flat (multitask)"
+        )
         print(
-            f"[i] VISOR enabled (mode={ft_config.visor_tactile_mode}, "
-            f"train_wwm={config.model.visor_train_wwm}, "
+            f"[i] VISOR enabled ({head_mode}, T-Rex sensor-only, "
             f"tau_split={ft_config.visor_flow_tau_split}, "
             f"history_vq={ft_config.visor_history_vq_tokens}, "
             f"tactile_weight={ft_config.visor_loss_weight_tactile})"

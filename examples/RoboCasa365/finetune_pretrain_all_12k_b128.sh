@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
-# Finetune vanilla GR00T N1.7 on all RoboCasa365 pretrain tasks (atomic + composite).
-# Native flat action head — recommended for large multitask mix (~301 datasets).
+# Finetune GR00T N1.7 on all RoboCasa365 pretrain tasks (atomic + composite).
+# Default: flat VISOR + MOSS (no component-factored head — better for multitask pretrain).
 #
-# Defaults: 12k steps, global batch 128, 4 GPUs (per-GPU batch 32).
-# Effective sample budget: 12000 × 128 = 1,536,000 steps.
+# Defaults: 120k steps, global batch 64, 8 GPUs (per-GPU batch 8).
+# Effective sample budget: 120000 × 64 = 7,680,000 samples.
+# Checkpoints saved every 10k steps (SAVE_STEPS=10000).
+#
+# Prerequisites for VISOR (once per machine / dataset refresh):
+#   SPLITS=pretrain bash examples/RoboCasa365/run_haptic_labels_all_missing.sh
 #
 # IO: shard_size=4096 + dataloader_workers=2 reduces HDD thrashing on 301-dataset mix.
 #
 # Usage:
-#   CUDA_VISIBLE_DEVICES=0,1,2,3 bash examples/RoboCasa365/finetune_pretrain_all_12k_b128.sh
+#   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash examples/RoboCasa365/finetune_pretrain_all_12k_b128.sh
 #
 # Optional env overrides:
 #   ROBOCASA365_ROOT, GR00T_BASE_MODEL, OUTPUT_DIR, MAX_STEPS, GLOBAL_BATCH_SIZE,
 #   NUM_GPUS, CUDA_VISIBLE_DEVICES, MASTER_PORT, DATALOADER_NUM_WORKERS,
-#   NUM_SHARDS_PER_EPOCH, SHARD_SIZE, SAVE_STEPS, ROBOCASA365_TASKS
+#   NUM_SHARDS_PER_EPOCH, SHARD_SIZE, SAVE_STEPS, ROBOCASA365_TASKS,
+#   USE_VISOR, USE_VISOR_COMPONENT_FACTORED, USE_MOTION, ...
 #
-# Optional MOSS + language-gated fusion (more VRAM; lower batch if OOM):
-#   USE_MOTION=1 GLOBAL_BATCH_SIZE=64 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-#     bash examples/RoboCasa365/finetune_pretrain_all_12k_b128.sh
+# VISOR on flat head (default): --use-visor only
+# VISOR + component-factored (single-task): USE_VISOR_COMPONENT_FACTORED=1
+#
+# Disable VISOR or MOSS:
+#   USE_VISOR=0 bash ...          # MOSS only (no tactile)
+#   USE_MOTION=0 bash ...         # VISOR only
+#   USE_VISOR=0 USE_MOTION=0 bash ...  # vanilla flat head
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,27 +38,43 @@ ROBOCASA365_SPLIT="${ROBOCASA365_SPLIT:-pretrain}"
 ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-all}"
 ROBOCASA365_TASKS="${ROBOCASA365_TASKS:-}"
 
-USE_MOTION="${USE_MOTION:-0}"
+USE_VISOR="${USE_VISOR:-1}"
+USE_VISOR_COMPONENT_FACTORED="${USE_VISOR_COMPONENT_FACTORED:-0}"
+USE_MOTION="${USE_MOTION:-1}"
 MOTION_INSERT_LAYER="${MOTION_INSERT_LAYER:-9}"
 TUNE_MOTION="${TUNE_MOTION:-1}"
 MOTION_USE_GATING="${MOTION_USE_GATING:-1}"
 
-if [[ "$USE_MOTION" == "1" ]]; then
+if [[ "$USE_VISOR" == "1" ]]; then
+  MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config_4frame.py}"
+elif [[ "$USE_MOTION" == "1" ]]; then
   MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config_4frame_no_tactile.py}"
-  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_12k_moss_b128_4frame_4gpu}"
 else
   MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config.py}"
-  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_12k_vanilla_b128_4gpu}"
+fi
+
+if [[ "$USE_VISOR" == "1" && "$USE_MOTION" == "1" ]]; then
+  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_visor_flat_moss_b64_4frame_8gpu}"
+elif [[ "$USE_VISOR" == "1" ]]; then
+  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_visor_b64_4frame_8gpu}"
+elif [[ "$USE_MOTION" == "1" ]]; then
+  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_moss_b64_4frame_8gpu}"
+else
+  OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_vanilla_b128_8gpu}"
 fi
 LOG_FILE="${LOG_FILE:-$OUTPUT_DIR/train.log}"
 
-NUM_GPUS="${NUM_GPUS:-4}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+NUM_GPUS="${NUM_GPUS:-8}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-MAX_STEPS="${MAX_STEPS:-12000}"
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
-SAVE_STEPS="${SAVE_STEPS:-2000}"
-SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-8}"
+MAX_STEPS="${MAX_STEPS:-120000}"
+if [[ "$USE_VISOR" == "1" || "$USE_MOTION" == "1" ]]; then
+  GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
+else
+  GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
+fi
+SAVE_STEPS="${SAVE_STEPS:-10000}"
+SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-13}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-2}"
 SHARD_SIZE="${SHARD_SIZE:-4096}"
 LOAD_BF16="${LOAD_BF16:-1}"
@@ -76,8 +101,16 @@ else
   echo "[i] task filter: (none — all pretrain atomic + composite tasks)"
 fi
 echo "[i] modality config: $MODALITY_CONFIG"
-echo "[i] head: native flat action_decoder (no component-factored / VISOR)"
-echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION motion_use_gating=$MOTION_USE_GATING"
+if [[ "$USE_VISOR" == "1" ]]; then
+  if [[ "$USE_VISOR_COMPONENT_FACTORED" == "1" ]]; then
+    echo "[i] head: component-factored + VISOR (T-Rex sensor-only)"
+  else
+    echo "[i] head: flat action_decoder + VISOR (T-Rex sensor-only, multitask)"
+  fi
+else
+  echo "[i] head: native flat action_decoder"
+fi
+echo "[i] use_visor=$USE_VISOR use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION motion_use_gating=$MOTION_USE_GATING"
 echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
 echo "[i] per_device_batch_size=$((GLOBAL_BATCH_SIZE / NUM_GPUS)) dataloader_workers=$DATALOADER_NUM_WORKERS prefetch=$DATALOADER_PREFETCH_FACTOR"
 echo "[i] load_bf16=$LOAD_BF16 optim=$OPTIM"
@@ -85,10 +118,21 @@ echo "[i] shard_size=$SHARD_SIZE num_shards_per_epoch=$NUM_SHARDS_PER_EPOCH save
 echo "[i] effective_samples=$((MAX_STEPS * GLOBAL_BATCH_SIZE))"
 echo "[i] output: $OUTPUT_DIR"
 echo "[i] log: $LOG_FILE"
+if [[ "$USE_VISOR" == "1" ]]; then
+  echo "[i] VISOR requires tactile.* columns in all parquets — run run_haptic_labels_all_missing.sh if missing"
+fi
 
 EXTRA=()
 if [[ -n "$ROBOCASA365_TASKS" ]]; then
   EXTRA+=(--robocasa365-tasks "$ROBOCASA365_TASKS")
+fi
+
+VISOR_ARGS=()
+if [[ "$USE_VISOR" == "1" ]]; then
+  VISOR_ARGS+=(--use-visor)
+  if [[ "$USE_VISOR_COMPONENT_FACTORED" == "1" ]]; then
+    VISOR_ARGS+=(--use-component-factored-head)
+  fi
 fi
 
 MOTION_ARGS=()
@@ -124,6 +168,7 @@ COMMON_ARGS=(
   --num-shards-per-epoch "$NUM_SHARDS_PER_EPOCH"
   --optim "$OPTIM"
   --dataloader-prefetch-factor "$DATALOADER_PREFETCH_FACTOR"
+  "${VISOR_ARGS[@]}"
   "${MOTION_ARGS[@]}"
 )
 if [[ "$LOAD_BF16" == "1" ]]; then

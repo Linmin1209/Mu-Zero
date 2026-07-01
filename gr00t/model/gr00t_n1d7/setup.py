@@ -32,6 +32,7 @@ from gr00t.model.modules.qwen3_motion import (
     ensure_motion_gate,
     is_motion_missing_key,
     motion_config_from_model_config,
+    resolve_motion_text_hidden_size,
 )
 from gr00t.model.registry import register_model
 
@@ -208,8 +209,6 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 "use_adaptive_component_head",
                 "use_component_factored_head",
                 "use_visor",
-                "visor_tactile_mode",
-                "visor_train_wwm",
                 "visor_flow_tau_split",
                 "visor_history_vq_tokens",
                 "visor_vq_codebook_size",
@@ -275,6 +274,13 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     if not _is_adaptive_action_head_key(k)
                     and not _is_flat_action_decoder_key(k)
                 ]
+            elif use_visor and not use_factored:
+                unexpected_keys = [
+                    k
+                    for k in unexpected_keys
+                    if not _is_adaptive_action_head_key(k)
+                    and not _is_component_factored_decoder_key(k)
+                ]
             elif getattr(model.config, "use_adaptive_component_head", False) is False:
                 unexpected_keys = [
                     k for k in unexpected_keys if not _is_adaptive_action_head_key(k)
@@ -287,10 +293,15 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 visual = model.backbone.model.visual
                 motion_block = getattr(visual, "motion_block", None)
                 motion_cfg = motion_config_from_model_config(model.config)
+                text_hidden_size = resolve_motion_text_hidden_size(model.backbone.model)
                 if motion_block is None:
                     from gr00t.model.modules.qwen3_motion import install_motion_module
 
-                    install_motion_module(visual, motion_cfg)
+                    install_motion_module(
+                        visual,
+                        motion_cfg,
+                        text_hidden_size=text_hidden_size,
+                    )
                     model.backbone._convert_motion_bn_to_float()
                     visual._gr00t_tune_motion_only = (
                         getattr(model.config, "tune_motion", True)
@@ -299,7 +310,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     logging.info(
                         "Installed MotionModule after checkpoint load (weights initialized)"
                     )
-                ensure_motion_gate(visual, motion_cfg)
+                ensure_motion_gate(
+                    visual, motion_cfg, text_hidden_size=text_hidden_size
+                )
             errors = []
             if other_missing:
                 errors.append(f"Missing keys ({len(other_missing)}): {other_missing}")

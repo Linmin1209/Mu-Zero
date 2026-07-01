@@ -60,10 +60,19 @@ class MotionConfig:
 class MotionFusionGate(nn.Module):
     """Scalar gate per batch: h' = h + g * moss_delta."""
 
-    def __init__(self, embed_dim: int, hidden_dim: int = 256):
+    def __init__(
+        self,
+        vision_dim: int,
+        text_dim: int | None = None,
+        hidden_dim: int = 256,
+    ):
         super().__init__()
+        text_dim = vision_dim if text_dim is None else text_dim
+        self.vision_dim = vision_dim
+        self.text_dim = text_dim
+        in_dim = text_dim + vision_dim * 2
         self.net = nn.Sequential(
-            nn.Linear(embed_dim * 3, hidden_dim),
+            nn.Linear(in_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
@@ -314,22 +323,67 @@ def _visual_forward_with_motion(
     return hidden_states, deepstack_feature_lists
 
 
-def ensure_motion_gate(visual: Any, config: MotionConfig) -> None:
+def resolve_motion_text_hidden_size(model_or_config: Any) -> int | None:
+    """Language embedding width for MOSS gate text context (often != vision hidden_size)."""
+    config = getattr(model_or_config, "config", model_or_config)
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        hidden = int(getattr(text_config, "hidden_size", 0))
+        if hidden > 0:
+            return hidden
+    hidden = int(getattr(config, "hidden_size", 0))
+    return hidden if hidden > 0 else None
+
+
+def _motion_gate_input_dim(vision_dim: int, text_dim: int | None) -> int:
+    text_dim = vision_dim if text_dim is None else text_dim
+    return text_dim + vision_dim * 2
+
+
+def ensure_motion_gate(
+    visual: Any,
+    config: MotionConfig,
+    *,
+    text_hidden_size: int | None = None,
+) -> None:
     if not config.use_motion or not config.motion_use_gating:
         return
-    if getattr(visual, "motion_gate", None) is not None:
-        return
-    hidden_size = visual.config.hidden_size
-    visual.motion_gate = MotionFusionGate(hidden_size, config.motion_gate_hidden)
+    vision_dim = visual.config.hidden_size
+    text_dim = text_hidden_size or vision_dim
+    expected_in = _motion_gate_input_dim(vision_dim, text_dim)
+
+    existing = getattr(visual, "motion_gate", None)
+    if existing is not None:
+        first_linear = existing.net[0]
+        if isinstance(first_linear, nn.Linear) and first_linear.in_features == expected_in:
+            return
+        logger.warning(
+            "Replacing MotionFusionGate (in_features %s -> %s; text=%s vision=%s)",
+            getattr(first_linear, "in_features", "?"),
+            expected_in,
+            text_dim,
+            vision_dim,
+        )
+
+    visual.motion_gate = MotionFusionGate(
+        vision_dim, text_dim, config.motion_gate_hidden
+    )
     visual._gr00t_motion_text_context = None
     logger.info(
-        "Installed MotionFusionGate (hidden=%s, gate_hidden=%s)",
-        hidden_size,
+        "Installed MotionFusionGate (text=%s vision=%s in=%s gate_hidden=%s)",
+        text_dim,
+        vision_dim,
+        expected_in,
         config.motion_gate_hidden,
     )
 
 
-def install_motion_module(visual: Any, config: MotionConfig) -> None:
+def install_motion_module(
+    visual: Any,
+    config: MotionConfig,
+    *,
+    text_hidden_size: int | None = None,
+) -> None:
     """Attach MotionModule to a HF Qwen3VLVisionModel and patch its forward pass."""
     if not config.use_motion:
         return
@@ -366,7 +420,7 @@ def install_motion_module(visual: Any, config: MotionConfig) -> None:
     )
     visual.motion_block.initialize_weights()
     if config.motion_use_gating:
-        ensure_motion_gate(visual, config)
+        ensure_motion_gate(visual, config, text_hidden_size=text_hidden_size)
         logger.info("MOSS fusion: task-modality gated residual")
     else:
         visual.motion_gate = None

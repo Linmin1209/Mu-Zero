@@ -1,21 +1,10 @@
-"""VISOR: WWM + tri-path IHT + flow-late refine + tactile auxiliary loss."""
+"""VISOR: T-Rex-style sensor tactile + tri-path IHT + flow-late refine."""
 
 from __future__ import annotations
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-
-VALID_VISOR_TACTILE_MODES = frozenset({"imagine", "sensor", "hybrid"})
-
-
-def normalize_visor_tactile_mode(mode: str) -> str:
-    normalized = str(mode).strip().lower()
-    if normalized not in VALID_VISOR_TACTILE_MODES:
-        raise ValueError(
-            f"visor_tactile_mode must be one of {sorted(VALID_VISOR_TACTILE_MODES)}, got {mode!r}"
-        )
-    return normalized
 
 
 def align_tactile_horizon(tactile: torch.Tensor, horizon: int) -> torch.Tensor:
@@ -32,6 +21,30 @@ def align_tactile_horizon(tactile: torch.Tensor, horizon: int) -> torch.Tensor:
         dtype=tactile.dtype,
     )
     return torch.cat([tactile, pad], dim=1)
+
+
+def resolve_sensor_tactile(
+    *,
+    tactile_sensor: torch.Tensor | None,
+    tactile_gt: torch.Tensor | None,
+    action_horizon: int,
+    training: bool,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Real tactile only (T-Rex sensor path). No imagined/WWM branch."""
+    if training and tactile_gt is not None and tactile_gt.shape[1] >= action_horizon:
+        seq = tactile_gt[:, :action_horizon]
+    elif tactile_sensor is not None:
+        seq = tactile_sensor
+        if seq.shape[1] != action_horizon:
+            seq = align_tactile_horizon(seq, action_horizon)
+    else:
+        raise ValueError(
+            "VISOR requires tactile_sensor (eval) or tactile_gt/tactile_sensor (train). "
+            "Use robocasa365_config_4frame.py with haptic labels and TactileObservationWrapper at eval."
+        )
+    return seq.to(device=device, dtype=dtype)
 
 
 def build_asymmetric_sa_mask(
@@ -178,67 +191,13 @@ class TriPathTactileEncoder(nn.Module):
         return tactile_pred[:, -1, :]
 
 
-class WristWorldModel(nn.Module):
-    """Predict future tactile from action trajectory + vision + proprio."""
-
-    def __init__(
-        self,
-        action_dim: int,
-        hidden_dim: int,
-        horizon: int,
-        vision_dim: int,
-        proprio_dim: int,
-        conv_kernel: int = 5,
-    ):
-        super().__init__()
-        self.horizon = horizon
-        in_dim = action_dim + vision_dim + proprio_dim
-        self.input_proj = nn.Linear(in_dim, hidden_dim)
-        self.step_embed = nn.Embedding(horizon, hidden_dim)
-        nn.init.normal_(self.step_embed.weight, mean=0.0, std=0.02)
-        padding = conv_kernel // 2
-        self.temporal = nn.Sequential(
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=conv_kernel, padding=padding),
-            nn.SiLU(),
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=conv_kernel, padding=padding),
-            nn.SiLU(),
-        )
-        self.out_proj = nn.Linear(hidden_dim, 3)
-        _zero_init_linear(self.out_proj)
-
-    def forward(
-        self,
-        action: torch.Tensor,
-        flow_time: torch.Tensor,
-        vision_context: torch.Tensor,
-        proprio: torch.Tensor,
-        *,
-        use_clean_action: bool = False,
-    ) -> torch.Tensor:
-        if use_clean_action:
-            action_input = action
-        else:
-            action_input = action * (1.0 - flow_time)
-        ctx = vision_context.unsqueeze(1).expand(-1, action_input.shape[1], -1)
-        prop = proprio.unsqueeze(1).expand(-1, action_input.shape[1], -1)
-        x = torch.cat([action_input, ctx, prop], dim=-1)
-        x = self.input_proj(x)
-        step_ids = torch.arange(action_input.shape[1], device=action.device, dtype=torch.long)
-        x = x + self.step_embed(step_ids).unsqueeze(0)
-        x = self.temporal(x.transpose(1, 2)).transpose(1, 2)
-        return self.out_proj(x)
-
-
 class VisorModule(nn.Module):
     def __init__(
         self,
         *,
-        action_dim: int,
-        hidden_dim: int,
         input_embedding_dim: int,
         action_horizon: int,
         vision_dim: int,
-        proprio_dim: int,
         decode_hidden_dim: int,
         flow_tau_split: float = 0.4,
         history_vq_tokens: int = 2,
@@ -265,13 +224,6 @@ class VisorModule(nn.Module):
         self.use_semantic_gate = use_semantic_gate
         lang_dim = language_dim if language_dim is not None else vision_dim
 
-        self.wwm = WristWorldModel(
-            action_dim,
-            hidden_dim,
-            action_horizon,
-            vision_dim,
-            proprio_dim,
-        )
         self.tri_path = TriPathTactileEncoder(
             input_embedding_dim=input_embedding_dim,
             vision_dim=vision_dim,

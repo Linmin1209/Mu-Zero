@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Component-factored action head with T-Rex-style sensor VISOR (tri-path IHT + flow-late)."""
+"""Native flat action head with T-Rex-style sensor VISOR (tri-path IHT + flow-late)."""
 
 from __future__ import annotations
 
@@ -12,9 +12,6 @@ import torch.nn.functional as F
 from transformers.feature_extraction_utils import BatchFeature
 
 from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
-from gr00t.model.modules.component_action.component_factored_action_head import (
-    build_component_factored_action_head,
-)
 from gr00t.model.modules.visor.visor import (
     VisorModule,
     build_asymmetric_sa_mask,
@@ -25,23 +22,21 @@ from gr00t.model.modules.visor.visor import (
 logger = logging.getLogger(__name__)
 
 
-def build_visor_factored_action_head(base_cls: type):
-    ComponentFactoredActionHead = build_component_factored_action_head(base_cls)
+def build_visor_flat_action_head(base_cls: type):
+    class VisorFlatActionHead(base_cls):
+        """Gr00tN1d7ActionHead + VISOR IHT tokens; keeps shared flat action_decoder."""
 
-    class VisorFactoredActionHead(ComponentFactoredActionHead):
         def __init__(self, config: Gr00tN1d7Config):
             super().__init__(config)
-            gate_components = getattr(config, "visor_gate_components", ("right_hand",))
-            if isinstance(gate_components, list):
-                gate_components = tuple(gate_components)
-            self.visor_gate_components = frozenset(gate_components)
             self.visor_tactile_warmup_steps = int(
                 getattr(config, "visor_tactile_warmup_steps", 1000)
             )
             self.visor_detach_tactile_for_gate = bool(
                 getattr(config, "visor_detach_tactile_for_gate", True)
             )
-            self.register_buffer("_visor_train_step", torch.zeros((), dtype=torch.long), persistent=False)
+            self.register_buffer(
+                "_visor_train_step", torch.zeros((), dtype=torch.long), persistent=False
+            )
 
             self.visor = VisorModule(
                 input_embedding_dim=self.input_embedding_dim,
@@ -64,11 +59,10 @@ def build_visor_factored_action_head(base_cls: type):
                 language_dim=config.backbone_embedding_dim,
             )
             logger.info(
-                "VisorFactoredActionHead (T-Rex sensor): tau_split=%.2f iht_tokens=%d "
-                "gate_components=%s tactile_weight=%.3f warmup=%d",
+                "VisorFlatActionHead (T-Rex sensor): tau_split=%.2f iht_tokens=%d "
+                "tactile_weight=%.3f warmup=%d",
                 self.visor.flow_tau_split,
                 self.visor.iht_tokens,
-                sorted(self.visor_gate_components),
                 self.visor.loss_weight_tactile,
                 self.visor_tactile_warmup_steps,
             )
@@ -104,23 +98,6 @@ def build_visor_factored_action_head(base_cls: type):
                 dtype=dtype,
             )
 
-        def decode_action_hidden(
-            self,
-            hidden: torch.Tensor,
-            embodiment_id: torch.Tensor,
-            *,
-            gate_delta: torch.Tensor | None = None,
-            action_input=None,
-            action_mask=None,
-        ) -> torch.Tensor:
-            return super().decode_action_hidden(
-                hidden,
-                embodiment_id,
-                gate_delta=gate_delta,
-                action_input=action_input,
-                action_mask=action_mask,
-            )
-
         def set_trainable_parameters(
             self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool
         ):
@@ -133,9 +110,7 @@ def build_visor_factored_action_head(base_cls: type):
             if self.training and not getattr(self.config, "tune_visor", True):
                 self.visor.eval()
 
-        def _expand_sa_mask(
-            self, sa_mask: torch.Tensor, batch_size: int
-        ) -> torch.Tensor:
+        def _expand_sa_mask(self, sa_mask: torch.Tensor, batch_size: int) -> torch.Tensor:
             if sa_mask.shape[0] == 1:
                 sa_mask = sa_mask.expand(batch_size, -1, -1)
             return sa_mask.unsqueeze(1)
@@ -179,6 +154,17 @@ def build_visor_factored_action_head(base_cls: type):
                 dtype=dtype,
             )
             return self._expand_sa_mask(sa_mask, batch_size)
+
+        def decode_action_hidden(
+            self,
+            hidden: torch.Tensor,
+            embodiment_id: torch.Tensor,
+            *,
+            gate_delta: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            if gate_delta is not None:
+                hidden = hidden + gate_delta
+            return self.action_decoder(hidden, embodiment_id)
 
         def forward(self, backbone_output, action_input):
             self.set_frozen_modules_to_eval_mode()
@@ -264,19 +250,8 @@ def build_visor_factored_action_head(base_cls: type):
             )
 
             action_mask = action_input.action_mask
-            per_elem_loss = F.mse_loss(pred_actions, velocity, reduction="none")
-            scaled_mask = action_mask.clone()
-            for seg in self.decoder_segments:
-                if seg.is_component:
-                    scaled_mask[:, :, seg.start : seg.end] *= float(
-                        self.schema.loss_weights.get(seg.name, 1.0)
-                    )
-            action_loss = per_elem_loss * action_mask
-            mask_sum = scaled_mask.sum()
-            if mask_sum <= 0:
-                flow_loss = per_elem_loss.new_zeros(())
-            else:
-                flow_loss = (per_elem_loss * scaled_mask).sum() / mask_sum
+            action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+            flow_loss = action_loss.sum() / (action_mask.sum() + 1e-6)
             loss = flow_loss
             tactile_loss = torch.zeros((), device=device, dtype=loss.dtype)
 
@@ -417,4 +392,4 @@ def build_visor_factored_action_head(base_cls: type):
                 }
             )
 
-    return VisorFactoredActionHead
+    return VisorFlatActionHead
