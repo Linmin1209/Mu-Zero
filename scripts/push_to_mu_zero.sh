@@ -35,8 +35,8 @@ else
   git remote set-url "$REMOTE" "$REMOTE_URL"
 fi
 
-REMOTE_URL="$(git remote get-url "$REMOTE")"
-DISPLAY_URL="$REMOTE_URL"
+PUSH_URL="$REMOTE_URL"
+DISPLAY_URL="$PUSH_URL"
 if [[ "$DISPLAY_URL" == *"x-access-token:"*"@"* ]]; then
   DISPLAY_URL="https://x-access-token:***@github.com/Linmin1209/Mu-Zero.git"
 elif [[ "$DISPLAY_URL" == https://*@* ]]; then
@@ -47,7 +47,7 @@ echo "[i] Branch: $BRANCH"
 git log -1 --oneline
 echo "[i] LFS upload: $([[ "$PUSH_LFS" == "1" ]] && echo forced || echo skip-by-default, auto-on-GH008)"
 
-if [[ "$REMOTE_URL" == git@github.com:* ]]; then
+if [[ "$PUSH_URL" == git@github.com:* ]]; then
   echo "[i] Testing GitHub SSH (timeout 15s) ..."
   set +e
   ssh -o BatchMode=yes -o ConnectTimeout=15 -T git@github.com 2>&1 | sed 's/^/[ssh] /'
@@ -76,11 +76,17 @@ GIT_LFS_CFG=(-c lfs.locksverify=false)
 push_git() {
   local log
   log="$(mktemp)"
+  local git_cmd=(git)
+  # Global ~/.gitconfig may set url.https://github.com/.insteadof=git@github.com:,
+  # which breaks SSH push (falls back to unauthenticated HTTPS).
+  if [[ "$PUSH_URL" == git@github.com:* ]]; then
+    git_cmd=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git)
+  fi
   set +e
-  if [[ "$REMOTE_URL" == https://* ]]; then
-    git "${GIT_HTTP_CFG[@]}" "${GIT_LFS_CFG[@]}" push "$REMOTE" "$BRANCH" "${PUSH_ARGS[@]}" 2>&1 | tee "$log"
+  if [[ "$PUSH_URL" == https://* ]]; then
+    "${git_cmd[@]}" "${GIT_HTTP_CFG[@]}" "${GIT_LFS_CFG[@]}" push "$REMOTE" "$BRANCH" "${PUSH_ARGS[@]}" 2>&1 | tee "$log"
   else
-    git "${GIT_LFS_CFG[@]}" push "$REMOTE" "$BRANCH" "${PUSH_ARGS[@]}" 2>&1 | tee "$log"
+    "${git_cmd[@]}" "${GIT_LFS_CFG[@]}" push "$REMOTE" "$BRANCH" "${PUSH_ARGS[@]}" 2>&1 | tee "$log"
   fi
   local status=${PIPESTATUS[0]}
   set -e
