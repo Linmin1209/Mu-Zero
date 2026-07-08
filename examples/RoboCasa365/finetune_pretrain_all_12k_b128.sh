@@ -44,6 +44,7 @@ USE_MOTION="${USE_MOTION:-1}"
 MOTION_INSERT_LAYER="${MOTION_INSERT_LAYER:-9}"
 TUNE_MOTION="${TUNE_MOTION:-1}"
 MOTION_USE_GATING="${MOTION_USE_GATING:-1}"
+MOTION_GATE_INIT_BIAS="${MOTION_GATE_INIT_BIAS:-1.5}"
 
 if [[ "$USE_VISOR" == "1" ]]; then
   MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config_4frame.py}"
@@ -106,7 +107,7 @@ if [[ "$USE_VISOR" == "1" ]]; then
 else
   echo "[i] head: native flat action_decoder"
 fi
-echo "[i] use_visor=$USE_VISOR use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION motion_use_gating=$MOTION_USE_GATING"
+echo "[i] use_visor=$USE_VISOR use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION motion_use_gating=$MOTION_USE_GATING motion_gate_init_bias=$MOTION_GATE_INIT_BIAS"
 echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
 echo "[i] per_device_batch_size=$((GLOBAL_BATCH_SIZE / NUM_GPUS)) dataloader_workers=$DATALOADER_NUM_WORKERS prefetch=$DATALOADER_PREFETCH_FACTOR"
 echo "[i] load_bf16=$LOAD_BF16 optim=$OPTIM"
@@ -139,11 +140,7 @@ if [[ "$USE_MOTION" == "1" ]]; then
   else
     MOTION_ARGS+=(--no-tune-motion)
   fi
-  if [[ "$MOTION_USE_GATING" == "1" ]]; then
-    MOTION_ARGS+=(--motion-use-gating)
-  else
-    MOTION_ARGS+=(--no-motion-use-gating)
-  fi
+  append_motion_gate_cli_args MOTION_ARGS
 fi
 
 COMMON_ARGS=(

@@ -1,0 +1,38 @@
+# VT closed-loop on RoboCasa365 — NO VISOR, MOSS ON
+
+model:
+  use_vt_closed_loop: true
+  use_visor: false
+  use_joint_dual_branch: false
+
+  # MOSS (retained)
+  use_motion: true
+  tune_motion: true
+  motion_use_gating: true
+  motion_gate_init_bias: 1.5
+  motion_insert_layer: 9
+
+  decouple_base_arm: true
+
+intent_adapter:
+  enable_intent_adapter: true
+  num_intent_tokens: 16
+
+tactile_encoder:
+  enable_tactile_encoder: true
+  tactile_dim: 3
+
+contact_gate:
+  enable_contact_gate: true
+
+action_decoder:
+  enable_structured_action_dit: true
+
+tactile_refiner:
+  enable_tactile_refiner: true
+
+# VISOR fields intentionally omitted — do not enable use_visor
+
+inference:
+  inference_use_flux: false
+  inference_execute_steps: 4

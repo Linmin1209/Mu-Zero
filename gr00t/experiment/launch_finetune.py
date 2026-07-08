@@ -50,6 +50,10 @@ from gr00t.configs.base_config import get_default_config
 from gr00t.configs.finetune_config import FinetuneConfig
 from gr00t.experiment.experiment import run
 from gr00t.experiment.local_models import resolve_local_paths
+from gr00t.experiment.dexjoco_datasets import (
+    get_default_dexjoco_modality_config_path,
+    resolve_dexjoco_dataset_paths,
+)
 from gr00t.experiment.robocasa365_datasets import (
     get_default_robocasa365_modality_config_path,
     resolve_robocasa365_dataset_paths,
@@ -70,12 +74,7 @@ def load_modality_config(modality_config_path: str):
         raise FileNotFoundError(f"Modality config path does not exist: {modality_config_path}")
 
 
-if __name__ == "__main__":
-    # Set LOGURU_LEVEL environment variable if not already set (default: INFO)
-    if "LOGURU_LEVEL" not in os.environ:
-        os.environ["LOGURU_LEVEL"] = "INFO"
-    # Use tyro for clean CLI
-    ft_config = tyro.cli(FinetuneConfig, description=__doc__)
+def run_finetune(ft_config: FinetuneConfig) -> None:
     from gr00t.data.embodiment_tags import EmbodimentTag
 
     if not ft_config.base_model_path.strip():
@@ -107,11 +106,39 @@ if __name__ == "__main__":
             print(f"  - {p}")
         if len(dataset_paths) > 5:
             print(f"  ... and {len(dataset_paths) - 5} more")
+    elif ft_config.dexjoco_root:
+        dataset_paths, resolved_embodiment = resolve_dexjoco_dataset_paths(
+            root=ft_config.dexjoco_root,
+            tasks=ft_config.dexjoco_tasks,
+            robot_type=ft_config.dexjoco_robot_type,
+        )
+        if EmbodimentTag.resolve(ft_config.embodiment_tag) == EmbodimentTag.NEW_EMBODIMENT:
+            ft_config.embodiment_tag = resolved_embodiment
+            embodiment_tag = EmbodimentTag.resolve(resolved_embodiment).value
+        if ft_config.modality_config_path is None:
+            robot_type = (
+                "single_arm"
+                if embodiment_tag == EmbodimentTag.DEXJOCo_SINGLE_ARM.value
+                else "bimanual"
+            )
+            ft_config.modality_config_path = str(
+                get_default_dexjoco_modality_config_path(robot_type)
+            )
+        print(
+            f"DexJoCo: {len(dataset_paths)} task dataset(s) "
+            f"(robot_type={ft_config.dexjoco_robot_type}, embodiment={embodiment_tag})"
+        )
+        if ft_config.dexjoco_tasks:
+            print(f"  tasks filter: {ft_config.dexjoco_tasks}")
+        for p in dataset_paths[:5]:
+            print(f"  - {p}")
+        if len(dataset_paths) > 5:
+            print(f"  ... and {len(dataset_paths) - 5} more")
     elif ft_config.dataset_path.strip():
         dataset_paths = [path for path in ft_config.dataset_path.split(os.pathsep) if path]
     else:
         raise ValueError(
-            "Provide --dataset-path or --robocasa365-root for finetuning."
+            "Provide --dataset-path, --robocasa365-root, or --dexjoco-root for finetuning."
         )
 
     # all rank workers should register for the modality config
@@ -145,9 +172,38 @@ if __name__ == "__main__":
     config.model.tune_motion = ft_config.tune_motion
     config.model.motion_use_gating = ft_config.motion_use_gating
     config.model.motion_gate_hidden = ft_config.motion_gate_hidden
+    config.model.motion_gate_init_bias = ft_config.motion_gate_init_bias
+    config.model.motion_gate_mode = ft_config.motion_gate_mode
+    config.model.motion_gate_g_min = ft_config.motion_gate_g_min
+    config.model.motion_gate_g_max = ft_config.motion_gate_g_max
+    config.model.motion_gate_lr_scale = ft_config.motion_gate_lr_scale
     config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
     config.model.use_component_factored_head = ft_config.use_component_factored_head
     config.model.use_visor = ft_config.use_visor
+    use_vt_closed_loop = bool(getattr(ft_config, "use_vt_closed_loop", False))
+    if use_vt_closed_loop:
+        if getattr(ft_config, "use_visor", False) or getattr(
+            ft_config, "use_joint_dual_branch", False
+        ):
+            raise ValueError(
+                "use_vt_closed_loop is incompatible with use_visor / use_joint_dual_branch."
+            )
+        sync_fn = getattr(ft_config, "sync_vt_model_fields", None)
+        if callable(sync_fn):
+            for key, value in sync_fn().items():
+                setattr(config.model, key, value)
+        else:
+            config.model.use_vt_closed_loop = True
+            config.model.use_visor = False
+            config.model.use_joint_dual_branch = False
+            config.model.decouple_base_arm = bool(
+                getattr(ft_config, "decouple_base_arm", True)
+            )
+        config.model.component_layout_embodiment_tag = embodiment_tag
+        print(
+            f"[i] VTClosedLoopActionHead enabled (stage={getattr(ft_config, 'vt_closed_loop_stage', 1)}, "
+            f"no VISOR; MOSS use_motion={ft_config.use_motion})"
+        )
     config.model.visor_flow_tau_split = ft_config.visor_flow_tau_split
     config.model.visor_history_vq_tokens = ft_config.visor_history_vq_tokens
     config.model.visor_vq_codebook_size = ft_config.visor_vq_codebook_size
@@ -156,16 +212,34 @@ if __name__ == "__main__":
     config.model.visor_use_semantic_gate = ft_config.visor_use_semantic_gate
     config.model.visor_use_split_action_gates = ft_config.visor_use_split_action_gates
     config.model.visor_arm_action_slice = ft_config.visor_arm_action_slice
+    config.model.visor_base_action_slice = ft_config.visor_base_action_slice
     config.model.visor_hand_action_slice = ft_config.visor_hand_action_slice
     config.model.visor_arm_action_dim = ft_config.visor_arm_action_dim
+    config.model.visor_base_action_dim = ft_config.visor_base_action_dim
     config.model.visor_hand_action_dim = ft_config.visor_hand_action_dim
+    config.model.visor_tactile_num_force = ft_config.visor_tactile_num_force
+    config.model.visor_tactile_num_contact = ft_config.visor_tactile_num_contact
     config.model.visor_tactile_warmup_steps = ft_config.visor_tactile_warmup_steps
+    config.model.visor_aux_warmup_steps = ft_config.visor_aux_warmup_steps
+    config.model.visor_aux_delay_steps = ft_config.visor_aux_delay_steps
+    config.model.visor_gate_mode = ft_config.visor_gate_mode
+    config.model.visor_tactile_align_mode = ft_config.visor_tactile_align_mode
+    config.model.visor_use_readout_fed_gates = ft_config.visor_use_readout_fed_gates
+    config.model.visor_use_visual_supervision = ft_config.visor_use_visual_supervision
+    config.model.visor_visual_waypoints = ft_config.visor_visual_waypoints
+    config.model.visor_visual_dim = ft_config.visor_visual_dim
+    config.model.visor_loss_weight_visual = ft_config.visor_loss_weight_visual
+    config.model.visor_visual_vq_tokens = ft_config.visor_visual_vq_tokens
+    config.model.visor_visual_gt_level = ft_config.visor_visual_gt_level
     config.model.visor_loss_weight_tactile = ft_config.visor_loss_weight_tactile
     config.model.visor_contact_loss_weight = ft_config.visor_contact_loss_weight
+    config.model.visor_use_tactile_supervision = ft_config.visor_use_tactile_supervision
     if ft_config.use_adaptive_component_head and ft_config.use_component_factored_head:
         raise ValueError(
             "Choose at most one of --use-adaptive-component-head and --use-component-factored-head."
         )
+    if ft_config.use_visor and use_vt_closed_loop:
+        raise ValueError("--use-visor is incompatible with --use-vt-closed-loop.")
     if ft_config.use_visor and ft_config.use_adaptive_component_head:
         raise ValueError("--use-visor is incompatible with --use-adaptive-component-head.")
     if ft_config.use_adaptive_component_head:
@@ -230,7 +304,11 @@ if __name__ == "__main__":
         print(
             f"[i] STSS/MOSS enabled at vision layer {ft_config.motion_insert_layer}; "
             f"tune_motion={ft_config.tune_motion}; "
-            f"motion_use_gating={ft_config.motion_use_gating}"
+            f"motion_use_gating={ft_config.motion_use_gating}; "
+            f"motion_gate_mode={ft_config.motion_gate_mode}; "
+            f"motion_gate_g=[{ft_config.motion_gate_g_min},{ft_config.motion_gate_g_max}]; "
+            f"motion_gate_init_bias={ft_config.motion_gate_init_bias}; "
+            f"motion_gate_lr_scale={ft_config.motion_gate_lr_scale}"
         )
     if ft_config.gradient_checkpointing is None:
         config.training.gradient_checkpointing = ft_config.use_motion
@@ -246,7 +324,13 @@ if __name__ == "__main__":
         config.model.extra_augmentation_config = None
 
     config.model.load_bf16 = ft_config.load_bf16
-    if ft_config.load_bf16:
+    if getattr(ft_config, "train_fp32", False):
+        config.training.bf16 = False
+        config.training.fp16 = False
+        config.model.load_bf16 = False
+        config.model.use_flash_attention = False
+        print("[i] train_fp32=True (full fp32 + sdpa; FlashAttention disabled)")
+    elif ft_config.load_bf16:
         print("[i] load_bf16=True (FlashAttention-2 + bf16 vision forward)")
     config.model.reproject_vision = False
     config.model.model_name = cosmos_path
@@ -305,3 +389,10 @@ if __name__ == "__main__":
             print("[i] GPU compute capability < 8.0 (e.g. V100): disabled tf32")
 
     run(config)
+
+
+if __name__ == "__main__":
+    if "LOGURU_LEVEL" not in os.environ:
+        os.environ["LOGURU_LEVEL"] = "INFO"
+    ft_config = tyro.cli(FinetuneConfig, description=__doc__)
+    run_finetune(ft_config)

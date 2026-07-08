@@ -214,7 +214,7 @@ class Qwen3Backbone(torch.nn.Module):
             self.model.visual.requires_grad_(False)
 
         if self.motion_config is not None and self.motion_config.use_motion:
-            set_motion_trainable(self.model.visual, tune_visual, self.tune_motion)
+            set_motion_trainable(self.model.visual, self.tune_motion, tune_visual)
             self.model.visual._gr00t_tune_motion_only = (
                 self.tune_motion and not self.tune_visual
             )
@@ -385,7 +385,9 @@ class Qwen3Backbone(torch.nn.Module):
             self.model.visual._gr00t_motion_text_context = None
 
         try:
-            outputs = self.model(**model_kwargs, output_hidden_states=True)
+            # Backbone-only forward: skip lm_head logits (saves ~4GB; unused for action training).
+            inner = getattr(self.model, "model", self.model)
+            outputs = inner(**model_kwargs, output_hidden_states=True)
         finally:
             if embed_hook is not None:
                 embed_hook.remove()

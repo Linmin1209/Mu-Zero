@@ -181,6 +181,7 @@ isaac_data/
 offline_open_loop_eval_plots/
 
 examples/RoboCasa365/local_paths.sh
+examples/DexJoCo/local_paths.sh
 
 # Local deploy scripts with OBS credentials
 launch_huawei.sh

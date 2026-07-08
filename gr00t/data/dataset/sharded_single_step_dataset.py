@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,35 @@ from gr00t.data.interfaces import ShardedDataset
 from gr00t.data.types import EmbodimentTag, MessageType, ModalityConfig, VLAStepData
 
 from .lerobot_episode_loader import LeRobotEpisodeLoader
+
+VIDEO_FUTURE_MODALITIES = frozenset({"video_future_manip", "video_future_nav"})
+
+
+def _compute_tactile_valid_flag(
+    step_index: int,
+    episode_len: int,
+    modality_configs: dict[str, ModalityConfig],
+    episode_data,
+    *,
+    allow_padding: bool,
+) -> bool:
+    """True when tactile supervision GT is trustworthy for this step."""
+    has_tactile_cols = any(str(c).startswith("tactile.") for c in episode_data.columns)
+    if not has_tactile_cols:
+        return False
+    if "tactile.valid" in episode_data.columns:
+        val = np.asarray(episode_data["tactile.valid"].iloc[step_index], dtype=np.float32).reshape(-1)
+        if val.size == 0 or float(val[0]) <= 0.0:
+            return False
+    if "tactile_future" not in modality_configs:
+        return True
+    raw_indices = [
+        step_index + delta_index
+        for delta_index in modality_configs["tactile_future"].delta_indices
+    ]
+    if allow_padding:
+        return all(0 <= idx < episode_len for idx in raw_indices)
+    return True
 
 
 def extract_step_data(
@@ -41,6 +71,24 @@ def extract_step_data(
         if allow_padding:
             indices_to_load = [max(0, min(idx, len(episode_data) - 1)) for idx in indices_to_load]
         column_prefix = "tactile" if modality == "tactile_future" else modality
+        if modality == "visual_future":
+            column_prefix = "visual_future"
+        if modality in VIDEO_FUTURE_MODALITIES:
+            step_data[modality] = {}
+            for key in config.modality_keys:
+                col = f"video.{key}"
+                if col not in episode_data.columns:
+                    raise KeyError(
+                        f"{col} not found for {modality}; available: {list(episode_data.columns)}"
+                    )
+                step_data[modality][key] = np.stack(
+                    [
+                        np.asarray(episode_data[col].iloc[i], dtype=np.uint8)
+                        for i in range(len(indices_to_load))
+                    ],
+                    axis=0,
+                )
+            continue
         for key in config.modality_keys:
             col = f"{column_prefix}.{key}"
             if col in episode_data.columns:
@@ -51,7 +99,7 @@ def extract_step_data(
                 raise KeyError(
                     f"{modality}.{key} not found in episode data, available keys: {episode_data.columns}"
                 )
-            if modality in ["state", "action", "tactile", "tactile_future"]:
+            if modality in ["state", "action", "tactile", "tactile_future", "visual_future"]:
                 # Stack arrays for numerical modalities
                 step_data[modality][key] = np.vstack(
                     [
@@ -86,6 +134,22 @@ def extract_step_data(
     tactile_future_data = step_data.get("tactile_future")
     if tactile_future_data:
         vla_step_data.metadata["tactile_future"] = tactile_future_data
+    vla_step_data.metadata["tactile_valid"] = _compute_tactile_valid_flag(
+        step_index,
+        len(episode_data),
+        modality_configs,
+        episode_data,
+        allow_padding=allow_padding,
+    )
+    video_future_manip = step_data.get("video_future_manip")
+    if video_future_manip:
+        vla_step_data.metadata["video_future_manip"] = video_future_manip
+    video_future_nav = step_data.get("video_future_nav")
+    if video_future_nav:
+        vla_step_data.metadata["video_future_nav"] = video_future_nav
+    visual_future_data = step_data.get("visual_future")
+    if visual_future_data:
+        vla_step_data.metadata["visual_future"] = visual_future_data
     return vla_step_data
 
 
@@ -282,7 +346,13 @@ class ShardedSingleStepDataset(ShardedDataset):
         """Get the number of timesteps in a specific shard."""
         return self.shard_lengths[idx]
 
-    def get_shard(self, idx: int) -> list:
+    def get_shard(
+        self,
+        idx: int,
+        *,
+        progress_label: str | None = None,
+        progress_interval: int | None = None,
+    ) -> list:
         """
         Load and process all timesteps in a specific shard.
 
@@ -291,17 +361,42 @@ class ShardedSingleStepDataset(ShardedDataset):
 
         Args:
             idx: Shard index to load
+            progress_label: Optional prefix for cache progress logs (mixture dataloader).
+            progress_interval: Log every N processed samples; defaults to ~5% of shard size.
 
         Returns:
             List of processed timesteps ready for model training
         """
         episodes = self.sharded_episodes[idx]
+        total = int(self.shard_lengths[idx])
+        interval = progress_interval
+        if interval is None:
+            interval = max(25, total // 20)
         datapoints = []
+        done = 0
+        t0 = time.time()
         for ep_idx, step_indices in episodes:
             # Load episode data once per episode in shard
             episode_data = self.episode_loader[ep_idx]
             for step_index in step_indices:
                 datapoints.append(self.get_datapoint(episode_data, step_index))
+                done += 1
+                if progress_label and (
+                    done == 1 or done == total or done % interval == 0
+                ):
+                    elapsed = time.time() - t0
+                    pct = 100.0 * done / total
+                    eta = (elapsed / done) * (total - done) if done > 0 else 0.0
+                    print(
+                        f"{progress_label}: {done}/{total} samples ({pct:.1f}%) "
+                        f"| {elapsed:.0f}s elapsed, ~{eta:.0f}s remaining",
+                        flush=True,
+                    )
+        if progress_label:
+            print(
+                f"{progress_label}: finished {total} samples in {time.time() - t0:.1f}s",
+                flush=True,
+            )
         return datapoints
 
     def get_dataset_statistics(self) -> dict:

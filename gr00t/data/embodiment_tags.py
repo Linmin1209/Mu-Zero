@@ -142,6 +142,12 @@ class EmbodimentTag(Enum):
     Uses the custom-embodiment finetuning projector slot.
     """
 
+    DEXJOCo_SINGLE_ARM = "dexjoco_single_arm"
+    """DexJoCo Franka + Allegro single-arm tasks (22D rotvec action)."""
+
+    DEXJOCo_BIMANUAL = "dexjoco_bimanual"
+    """DexJoCo bimanual Franka + Allegro tasks (44D rotvec action)."""
+
     @classmethod
     def resolve(cls, tag: "str | EmbodimentTag") -> "EmbodimentTag":
         """Resolve a string to an EmbodimentTag, case-insensitively.
@@ -219,6 +225,8 @@ FINETUNE_ONLY_TAGS: frozenset[EmbodimentTag] = frozenset(
         EmbodimentTag.NEW_EMBODIMENT,
         EmbodimentTag.ROBOCASA_PANDA_OMRON,
         EmbodimentTag.ROBOCASA_GR1_TABLETOP,
+        EmbodimentTag.DEXJOCo_SINGLE_ARM,
+        EmbodimentTag.DEXJOCo_BIMANUAL,
     }
 )
 """Tags for custom robots (finetuning only, not in any shipped checkpoint)."""

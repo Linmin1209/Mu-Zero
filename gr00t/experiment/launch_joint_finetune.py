@@ -1,0 +1,406 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Launch MoT joint finetune: shared DiT inpaint + GR00T VISOR action flow matching.
+# See examples/RoboCasa365/JOINT_DUAL_BRANCH_DESIGN.md
+#
+# RoboCasa365 (local LeRobot roots under robocasa365-datasets):
+#   --robocasa365-root /path/to/robocasa365-datasets
+#   --robocasa365-split pretrain|target|all
+#   --robocasa365-category atomic|composite|all
+#   --robocasa365-tasks TaskA,TaskB   (optional; default = all matching tasks)
+#   --embodiment-tag ROBOCASA_PANDA_OMRON
+#   --modality-config-path examples/RoboCasa365/robocasa365_config.py
+#
+# Pre-downloaded weights (no HuggingFace): HDD_POOL/linmin/models/{GR00T-N1.7-3B,Cosmos-Reason2-2B}
+
+import json
+import os
+from pathlib import Path
+
+# Must run before any other ``gr00t`` import (see gr00t/__init__.py patches).
+_MODELS_ROOT = Path(
+    os.environ.get(
+        "GR00T_MODELS_ROOT",
+        "/HOME/sysu_xdliang/sysu_xdliang_1/HDD_POOL/linmin/models",
+    )
+)
+os.environ.setdefault("GR00T_MODELS_ROOT", str(_MODELS_ROOT))
+os.environ["GROOT_PATCH_MISTRAL"] = "1"
+os.environ["GROOT_HF_LOCAL_FIRST"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ.setdefault("HF_HOME", str(_MODELS_ROOT / ".hf_cache"))
+
+import tyro
+
+from gr00t.configs.base_config import get_default_config
+from gr00t.configs.joint_finetune_config import JointFinetuneConfig
+from gr00t.experiment.experiment import run
+from gr00t.experiment.local_models import resolve_local_paths
+from gr00t.experiment.dexjoco_datasets import (
+    get_default_dexjoco_modality_config_path,
+    resolve_dexjoco_dataset_paths,
+)
+from gr00t.experiment.robocasa365_datasets import (
+    get_default_robocasa365_modality_config_path,
+    resolve_robocasa365_dataset_paths,
+)
+
+
+# Make sure the user provided modality config is registered.
+def load_modality_config(modality_config_path: str):
+    import importlib
+    import sys
+
+    path = Path(modality_config_path)
+    if path.exists() and path.suffix == ".py":
+        sys.path.append(str(path.parent))
+        importlib.import_module(path.stem)
+        print(f"Loaded modality config: {path}")
+    else:
+        raise FileNotFoundError(f"Modality config path does not exist: {modality_config_path}")
+
+
+if __name__ == "__main__":
+    # Set LOGURU_LEVEL environment variable if not already set (default: INFO)
+    if "LOGURU_LEVEL" not in os.environ:
+        os.environ["LOGURU_LEVEL"] = "INFO"
+    # Use tyro for clean CLI
+    ft_config = tyro.cli(JointFinetuneConfig, description=__doc__)
+    ft_config.use_joint_dual_branch = True
+    from gr00t.data.embodiment_tags import EmbodimentTag
+
+    if not ft_config.base_model_path.strip():
+        ft_config.base_model_path = str(
+            Path(os.environ.get("GR00T_BASE_MODEL_PATH", resolve_local_paths()[0]))
+        )
+    gr00t_path, cosmos_path = resolve_local_paths(ft_config.base_model_path)
+    ft_config.base_model_path = gr00t_path
+
+    ft_config.embodiment_tag = EmbodimentTag.resolve(ft_config.embodiment_tag)
+    embodiment_tag = ft_config.embodiment_tag.value
+
+    if ft_config.robocasa365_root:
+        if ft_config.modality_config_path is None:
+            ft_config.modality_config_path = str(get_default_robocasa365_modality_config_path())
+        dataset_paths = resolve_robocasa365_dataset_paths(
+            root=ft_config.robocasa365_root,
+            split=ft_config.robocasa365_split,
+            category=ft_config.robocasa365_category,
+            tasks=ft_config.robocasa365_tasks,
+        )
+        print(
+            f"RoboCasa365: {len(dataset_paths)} lerobot dataset(s) "
+            f"(split={ft_config.robocasa365_split}, category={ft_config.robocasa365_category})"
+        )
+        if ft_config.robocasa365_tasks:
+            print(f"  tasks filter: {ft_config.robocasa365_tasks}")
+        for p in dataset_paths[:5]:
+            print(f"  - {p}")
+        if len(dataset_paths) > 5:
+            print(f"  ... and {len(dataset_paths) - 5} more")
+    elif ft_config.dexjoco_root:
+        dataset_paths, resolved_embodiment = resolve_dexjoco_dataset_paths(
+            root=ft_config.dexjoco_root,
+            tasks=ft_config.dexjoco_tasks,
+            robot_type=ft_config.dexjoco_robot_type,
+        )
+        if EmbodimentTag.resolve(ft_config.embodiment_tag) == EmbodimentTag.NEW_EMBODIMENT:
+            ft_config.embodiment_tag = resolved_embodiment
+            embodiment_tag = EmbodimentTag.resolve(resolved_embodiment).value
+        if ft_config.modality_config_path is None:
+            robot_type = (
+                "single_arm"
+                if embodiment_tag == EmbodimentTag.DEXJOCo_SINGLE_ARM.value
+                else "bimanual"
+            )
+            ft_config.modality_config_path = str(
+                get_default_dexjoco_modality_config_path(robot_type)
+            )
+        print(
+            f"DexJoCo: {len(dataset_paths)} task dataset(s) "
+            f"(robot_type={ft_config.dexjoco_robot_type}, embodiment={embodiment_tag})"
+        )
+        if ft_config.dexjoco_tasks:
+            print(f"  tasks filter: {ft_config.dexjoco_tasks}")
+        for p in dataset_paths[:5]:
+            print(f"  - {p}")
+        if len(dataset_paths) > 5:
+            print(f"  ... and {len(dataset_paths) - 5} more")
+    elif ft_config.dataset_path.strip():
+        dataset_paths = [path for path in ft_config.dataset_path.split(os.pathsep) if path]
+    else:
+        raise ValueError(
+            "Provide --dataset-path, --robocasa365-root, or --dexjoco-root for finetuning."
+        )
+
+    # all rank workers should register for the modality config
+    if ft_config.modality_config_path is not None:
+        load_modality_config(ft_config.modality_config_path)
+
+    config = get_default_config().load_dict(
+        {
+            "data": {
+                "download_cache": False,
+                "datasets": [
+                    {
+                        "dataset_paths": dataset_paths,
+                        "mix_ratio": 1.0,
+                        "embodiment_tag": embodiment_tag,
+                    }
+                ],
+            }
+        }
+    )
+    config.load_config_path = None
+
+    # overwrite with finetune config supplied by the user
+    config.model.tune_llm = ft_config.tune_llm
+    config.model.tune_visual = ft_config.tune_visual
+    config.model.tune_projector = ft_config.tune_projector
+    config.model.tune_diffusion_model = ft_config.tune_diffusion_model
+    config.model.state_dropout_prob = ft_config.state_dropout_prob
+    config.model.use_motion = ft_config.use_motion
+    config.model.motion_insert_layer = ft_config.motion_insert_layer
+    config.model.tune_motion = ft_config.tune_motion
+    config.model.motion_use_gating = ft_config.motion_use_gating
+    config.model.motion_gate_hidden = ft_config.motion_gate_hidden
+    config.model.motion_gate_init_bias = ft_config.motion_gate_init_bias
+    config.model.motion_gate_mode = ft_config.motion_gate_mode
+    config.model.motion_gate_g_min = ft_config.motion_gate_g_min
+    config.model.motion_gate_g_max = ft_config.motion_gate_g_max
+    config.model.motion_gate_lr_scale = ft_config.motion_gate_lr_scale
+    config.model.use_adaptive_component_head = ft_config.use_adaptive_component_head
+    config.model.use_component_factored_head = ft_config.use_component_factored_head
+    config.model.use_visor = ft_config.use_visor
+    config.model.visor_flow_tau_split = ft_config.visor_flow_tau_split
+    config.model.visor_history_vq_tokens = ft_config.visor_history_vq_tokens
+    config.model.visor_vq_codebook_size = ft_config.visor_vq_codebook_size
+    config.model.visor_vq_commit_weight = ft_config.visor_vq_commit_weight
+    config.model.visor_use_contact_rate_prior = ft_config.visor_use_contact_rate_prior
+    config.model.visor_use_semantic_gate = ft_config.visor_use_semantic_gate
+    config.model.visor_use_split_action_gates = ft_config.visor_use_split_action_gates
+    config.model.visor_arm_action_slice = ft_config.visor_arm_action_slice
+    config.model.visor_base_action_slice = ft_config.visor_base_action_slice
+    config.model.visor_hand_action_slice = ft_config.visor_hand_action_slice
+    config.model.visor_arm_action_dim = ft_config.visor_arm_action_dim
+    config.model.visor_base_action_dim = ft_config.visor_base_action_dim
+    config.model.visor_hand_action_dim = ft_config.visor_hand_action_dim
+    config.model.visor_tactile_num_force = ft_config.visor_tactile_num_force
+    config.model.visor_tactile_num_contact = ft_config.visor_tactile_num_contact
+    config.model.visor_tactile_warmup_steps = ft_config.visor_tactile_warmup_steps
+    config.model.visor_aux_warmup_steps = ft_config.visor_aux_warmup_steps
+    config.model.visor_aux_delay_steps = ft_config.visor_aux_delay_steps
+    config.model.visor_gate_mode = ft_config.visor_gate_mode
+    config.model.visor_tactile_align_mode = ft_config.visor_tactile_align_mode
+    config.model.visor_use_readout_fed_gates = ft_config.visor_use_readout_fed_gates
+    config.model.visor_use_visual_supervision = ft_config.visor_use_visual_supervision
+    config.model.visor_visual_waypoints = ft_config.visor_visual_waypoints
+    config.model.visor_visual_dim = ft_config.visor_visual_dim
+    config.model.visor_loss_weight_visual = ft_config.visor_loss_weight_visual
+    config.model.visor_visual_vq_tokens = ft_config.visor_visual_vq_tokens
+    config.model.visor_visual_gt_level = ft_config.visor_visual_gt_level
+    config.model.visor_loss_weight_tactile = ft_config.visor_loss_weight_tactile
+    config.model.visor_contact_loss_weight = ft_config.visor_contact_loss_weight
+    config.model.visor_use_tactile_supervision = ft_config.visor_use_tactile_supervision
+    if ft_config.use_adaptive_component_head and ft_config.use_component_factored_head:
+        raise ValueError(
+            "Choose at most one of --use-adaptive-component-head and --use-component-factored-head."
+        )
+    if ft_config.use_visor and ft_config.use_adaptive_component_head:
+        raise ValueError("--use-visor is incompatible with --use-adaptive-component-head.")
+    if ft_config.use_adaptive_component_head:
+        component_dims = None
+        if ft_config.modality_config_path:
+            try:
+                import importlib.util
+
+                spec = importlib.util.spec_from_file_location(
+                    "mod_cfg", ft_config.modality_config_path
+                )
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    component_dims = getattr(mod, "ROBOCASA365_COMPONENT_PROJECTOR_DIMS", None)
+            except Exception:
+                component_dims = None
+        config.model.component_projector_dims = component_dims
+        print("[i] AdaptiveEmbodimentActionHead enabled (component-level MSAT decoder)")
+    if ft_config.use_component_factored_head:
+        action_key_dims = None
+        action_key_order = None
+        component_dims = None
+        if ft_config.modality_config_path:
+            try:
+                import importlib.util
+
+                spec = importlib.util.spec_from_file_location(
+                    "mod_cfg", ft_config.modality_config_path
+                )
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    action_key_dims = getattr(mod, "ROBOCASA365_ACTION_KEY_DIMS", None)
+                    component_dims = getattr(mod, "ROBOCASA365_COMPONENT_PROJECTOR_DIMS", None)
+                    cfg = getattr(mod, "robocasa365_panda_omron_config", None)
+                    if cfg is not None:
+                        action_key_order = list(cfg["action"].modality_keys)
+            except Exception:
+                pass
+        config.model.component_action_key_dims = action_key_dims
+        config.model.component_action_key_order = action_key_order
+        config.model.component_projector_dims = component_dims
+        config.model.component_layout_embodiment_tag = embodiment_tag
+        print(
+            "[i] ComponentFactoredActionHead enabled "
+            "(native AlternateVLDiT + per-component CategorySpecificMLP decoders)"
+        )
+    if ft_config.use_visor:
+        head_mode = (
+            "component-factored"
+            if ft_config.use_component_factored_head
+            else "flat (multitask)"
+        )
+        print(
+            f"[i] VISOR enabled ({head_mode}, T-Rex sensor-only, "
+            f"tau_split={ft_config.visor_flow_tau_split}, "
+            f"history_vq={ft_config.visor_history_vq_tokens}, "
+            f"tactile_weight={ft_config.visor_loss_weight_tactile})"
+        )
+    if ft_config.use_motion:
+        print(
+            f"[i] STSS/MOSS enabled at vision layer {ft_config.motion_insert_layer}; "
+            f"tune_motion={ft_config.tune_motion}; "
+            f"motion_use_gating={ft_config.motion_use_gating}; "
+            f"motion_gate_init_bias={ft_config.motion_gate_init_bias}"
+        )
+    if ft_config.gradient_checkpointing is None:
+        config.training.gradient_checkpointing = ft_config.use_motion
+    else:
+        config.training.gradient_checkpointing = ft_config.gradient_checkpointing
+    if config.training.gradient_checkpointing:
+        print("[i] gradient_checkpointing enabled (reduces vision/motion activation memory)")
+    config.model.random_rotation_angle = ft_config.random_rotation_angle
+    config.model.color_jitter_params = ft_config.color_jitter_params
+    if ft_config.extra_augmentation_config:
+        config.model.extra_augmentation_config = json.loads(ft_config.extra_augmentation_config)
+    else:
+        config.model.extra_augmentation_config = None
+
+    config.model.load_bf16 = ft_config.load_bf16
+    if ft_config.load_bf16:
+        print("[i] load_bf16=True (FlashAttention-2 + bf16 vision forward)")
+    config.model.reproject_vision = False
+    config.model.model_name = cosmos_path
+    config.training.transformers_local_files_only = True
+    config.training.start_from_checkpoint = gr00t_path
+    print(f"Local GR00T base: {gr00t_path}")
+    print(f"Local Cosmos VLM: {cosmos_path}")
+    print("HuggingFace Hub disabled (offline local checkpoints only)")
+    config.model.backbone_trainable_params_fp32 = True
+    config.model.use_relative_action = True
+
+    config.training.experiment_name = ft_config.experiment_name
+    config.training.optim = ft_config.optim
+    print(f"[i] optim={ft_config.optim}")
+    config.training.global_batch_size = ft_config.global_batch_size
+    config.training.dataloader_num_workers = ft_config.dataloader_num_workers
+    config.training.learning_rate = ft_config.learning_rate
+    config.training.gradient_accumulation_steps = ft_config.gradient_accumulation_steps
+    config.training.output_dir = ft_config.output_dir
+    config.training.save_steps = ft_config.save_steps
+    config.training.save_total_limit = ft_config.save_total_limit
+    config.training.num_gpus = ft_config.num_gpus
+    config.training.use_wandb = ft_config.use_wandb
+    config.training.max_steps = ft_config.max_steps
+    config.training.weight_decay = ft_config.weight_decay
+    config.training.warmup_ratio = ft_config.warmup_ratio
+    config.training.wandb_project = ft_config.wandb_project
+
+    config.data.shard_size = ft_config.shard_size
+    config.data.episode_sampling_rate = ft_config.episode_sampling_rate
+    config.data.num_shards_per_epoch = ft_config.num_shards_per_epoch
+    config.training.dataloader_prefetch_factor = ft_config.dataloader_prefetch_factor
+
+    config.model.use_joint_dual_branch = True
+    config.model.decouple_base_arm = ft_config.decouple_base_arm
+    config.model.mot_inpaint_tokens = ft_config.mot_inpaint_tokens
+    config.model.max_steps = ft_config.max_steps
+    config.model.joint_train_mode = ft_config.joint_train_mode
+    config.model.joint_flux_model_path = ft_config.joint_flux_model_path
+    config.model.joint_flux_future_delta = ft_config.joint_flux_future_delta
+    config.model.joint_flux_resolution = ft_config.joint_flux_resolution
+    config.model.joint_flux_mask_mode = ft_config.joint_flux_mask_mode
+    config.model.joint_flux_logit_mean = ft_config.joint_flux_logit_mean
+    config.model.joint_flux_logit_std = ft_config.joint_flux_logit_std
+    config.model.joint_phase1_ratio = ft_config.joint_phase1_ratio
+    config.model.joint_alpha_phase1 = ft_config.joint_alpha_phase1
+    config.model.joint_beta_phase1 = ft_config.joint_beta_phase1
+    config.model.joint_alpha_phase2 = ft_config.joint_alpha_phase2
+    config.model.joint_beta_phase2 = ft_config.joint_beta_phase2
+    config.model.joint_visor_aux_delay_steps = ft_config.joint_visor_aux_delay_steps
+    config.model.joint_visor_visual_weight_phase1 = ft_config.joint_visor_visual_weight_phase1
+    config.model.joint_visor_visual_weight_phase2 = ft_config.joint_visor_visual_weight_phase2
+    config.model.joint_visor_tactile_weight_phase1 = ft_config.joint_visor_tactile_weight_phase1
+    config.model.joint_visor_tactile_weight_phase2 = ft_config.joint_visor_tactile_weight_phase2
+
+    if not ft_config.use_visor:
+        raise ValueError("Joint dual-branch training requires --use-visor.")
+    print(
+        "[i] MoT joint: mode=%s decouple_base_arm=%s phase1_ratio=%.2f alpha/beta p1=%s/%s p2=%s/%s "
+        "visual_w p1/p2=%s/%s tactile_w p1/p2=%s/%s vae=%s inpaint_tokens=%d"
+        % (
+            ft_config.joint_train_mode,
+            ft_config.decouple_base_arm,
+            ft_config.joint_phase1_ratio,
+            ft_config.joint_alpha_phase1,
+            ft_config.joint_beta_phase1,
+            ft_config.joint_alpha_phase2,
+            ft_config.joint_beta_phase2,
+            ft_config.joint_visor_visual_weight_phase1,
+            ft_config.joint_visor_visual_weight_phase2,
+            ft_config.joint_visor_tactile_weight_phase1,
+            ft_config.joint_visor_tactile_weight_phase2,
+            ft_config.joint_flux_model_path,
+            ft_config.mot_inpaint_tokens,
+        )
+    )
+
+    from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
+
+    mod_cfg = MODALITY_CONFIGS.get(embodiment_tag)
+    if mod_cfg and "video" in mod_cfg:
+        min_vid_delta = min(mod_cfg["video"].delta_indices)
+        if min_vid_delta < 0:
+            config.data.allow_padding = True
+            print(
+                f"[i] video delta_indices min={min_vid_delta}; "
+                "enabled data.allow_padding for episode start"
+            )
+
+    config.training.save_only_model = ft_config.save_only_model
+    config.training.resume_from_checkpoint = ft_config.resume_from_checkpoint
+    config.training.skip_weight_loading = ft_config.skip_weight_loading
+
+    import torch
+
+    if torch.cuda.is_available():
+        cc_major, _ = torch.cuda.get_device_capability()
+        if cc_major < 8:
+            config.training.tf32 = False
+            print("[i] GPU compute capability < 8.0 (e.g. V100): disabled tf32")
+
+    run(config)

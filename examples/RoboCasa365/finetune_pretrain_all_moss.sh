@@ -14,6 +14,7 @@
 #   ROBOCASA365_ROOT, GR00T_BASE_MODEL, OUTPUT_DIR, MAX_STEPS, GLOBAL_BATCH_SIZE,
 #   NUM_GPUS, CUDA_VISIBLE_DEVICES, MASTER_PORT, DATALOADER_NUM_WORKERS,
 #   USE_MOTION, MOTION_INSERT_LAYER, TUNE_MOTION, MOTION_USE_GATING (default 1),
+#   MOTION_GATE_INIT_BIAS (default 1.5), MOTION_GATE_HIDDEN (default 256),
 #   NUM_SHARDS_PER_EPOCH, SHARD_SIZE
 set -euo pipefail
 
@@ -25,8 +26,8 @@ source "$SCRIPT_DIR/env_defaults.sh"
 ROBOCASA365_SPLIT="${ROBOCASA365_SPLIT:-pretrain}"
 ROBOCASA365_CATEGORY="${ROBOCASA365_CATEGORY:-all}"
 ROBOCASA365_TASKS="${ROBOCASA365_TASKS:-}"
-# 4-frame video without tactile — full pretrain mix has no tactile.* in most parquets.
-MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config_4frame_no_tactile.py}"
+# 4-frame video, native modalities only (no tactile / no FLUX future video).
+MODALITY_CONFIG="${MODALITY_CONFIG:-$SCRIPT_DIR/robocasa365_config_4frame.py}"
 OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/output/rc365_pretrain_all_120k_moss_b64_4frame_4gpu}"
 LOG_FILE="${LOG_FILE:-$OUTPUT_DIR/train.log}"
 
@@ -50,6 +51,8 @@ USE_MOTION="${USE_MOTION:-1}"
 MOTION_INSERT_LAYER="${MOTION_INSERT_LAYER:-9}"
 TUNE_MOTION="${TUNE_MOTION:-1}"
 MOTION_USE_GATING="${MOTION_USE_GATING:-1}"
+MOTION_GATE_INIT_BIAS="${MOTION_GATE_INIT_BIAS:-1.5}"
+MOTION_GATE_HIDDEN="${MOTION_GATE_HIDDEN:-256}"
 
 cd "$PROJECT_ROOT"
 mkdir -p "$OUTPUT_DIR"
@@ -63,8 +66,8 @@ if [[ -n "$ROBOCASA365_TASKS" ]]; then
 else
   echo "[i] task filter: (none — all tasks under split/category)"
 fi
-echo "[i] modality config: $MODALITY_CONFIG (4-frame video delta [-6,-4,-2,0], no tactile)"
-echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION motion_use_gating=$MOTION_USE_GATING"
+echo "[i] modality config: $MODALITY_CONFIG (4-frame video delta [-6,-4,-2,0], native — no tactile/FLUX)"
+echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION motion_use_gating=$MOTION_USE_GATING motion_gate_mode=$MOTION_GATE_MODE motion_gate_g=[$MOTION_GATE_G_MIN,$MOTION_GATE_G_MAX] motion_gate_init_bias=$MOTION_GATE_INIT_BIAS"
 echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS cuda_visible=$CUDA_VISIBLE_DEVICES"
 echo "[i] per_device_batch_size=$((GLOBAL_BATCH_SIZE / NUM_GPUS)) dataloader_workers=$DATALOADER_NUM_WORKERS prefetch=$DATALOADER_PREFETCH_FACTOR"
 echo "[i] load_bf16=$LOAD_BF16 optim=$OPTIM video_backend=$VIDEO_BACKEND"
@@ -86,11 +89,7 @@ if [[ "$USE_MOTION" == "1" ]]; then
   else
     MOTION_ARGS+=(--no-tune-motion)
   fi
-  if [[ "$MOTION_USE_GATING" == "1" ]]; then
-    MOTION_ARGS+=(--motion-use-gating)
-  else
-    MOTION_ARGS+=(--no-motion-use-gating)
-  fi
+  append_motion_gate_cli_args MOTION_ARGS
 fi
 
 COMMON_ARGS=(

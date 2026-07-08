@@ -55,6 +55,15 @@ class FinetuneConfig:
     robocasa365_tasks: str | None = None
     """Optional comma-separated RoboCasa365 task names (e.g. CloseElectricKettleLid,WashLettuce)."""
 
+    dexjoco_root: str | None = None
+    """Root containing DexJoCo LeRobot v3 task folders (e.g. dexjoco_lerobot_datasets/)."""
+
+    dexjoco_robot_type: str = "all"
+    """DexJoCo filter: single_arm, bimanual, or all (must not mix types in one run)."""
+
+    dexjoco_tasks: str | None = None
+    """Optional comma-separated DexJoCo task names."""
+
     modality_config_path: str | None = None
     """
     Path to a Python file defining the modality configuration for the given embodiment. 
@@ -83,6 +92,17 @@ class FinetuneConfig:
     motion_gate_hidden: int = 256
     """Hidden size of the MOSS fusion gate MLP."""
 
+    motion_gate_init_bias: float = 0.0
+    """Logit bias; with default g range [0, 0.8] yields initial g≈0.4."""
+
+    motion_gate_mode: str = "text_only"
+    """text_only: language-only gate (task-conditional). full: legacy text+vision+temporal."""
+
+    motion_gate_g_min: float = 0.0
+    motion_gate_g_max: float = 0.8
+    motion_gate_lr_scale: float = 5.0
+    """Optimizer LR multiplier for motion_gate (small module)."""
+
     gradient_checkpointing: bool | None = None
     """Enable activation checkpointing. Default: auto-on when use_motion is True."""
 
@@ -91,6 +111,13 @@ class FinetuneConfig:
 
     use_component_factored_head: bool = False
     """If True, keep native AlternateVLDiT and use per-component CategorySpecificMLP decoders."""
+
+    use_vt_closed_loop: bool = False
+    """VT closed-loop head (replaces VISOR; keeps MOSS on vision backbone)."""
+
+    vt_closed_loop_stage: int = 1
+
+    decouple_base_arm: bool = True
 
     use_visor: bool = False
     """If True, enable T-Rex-style sensor VISOR. Uses flat head unless component_factored is set."""
@@ -107,16 +134,47 @@ class FinetuneConfig:
     visor_use_semantic_gate: bool = True
     visor_use_split_action_gates: bool = True
     visor_arm_action_slice: tuple[int, int] = (1, 7)
+    visor_base_action_slice: tuple[int, int] = (7, 11)
     visor_hand_action_slice: tuple[int, int] = (0, 1)
     visor_arm_action_dim: int = 6
+    visor_base_action_dim: int = 4
     visor_hand_action_dim: int = 1
-    visor_tactile_warmup_steps: int = 1000
+    visor_tactile_num_force: int = 2
+    visor_tactile_num_contact: int = 1
+    visor_tactile_warmup_steps: int = 2000
+    """Gate coupling ramp steps (alias: visor_aux_warmup_steps)."""
+
+    visor_aux_warmup_steps: int = 2000
+    """Ramp for gate coupling and auxiliary losses."""
+
+    visor_aux_delay_steps: int = 500
+    """Steps before auxiliary losses activate."""
+
+    visor_gate_mode: str = "tactile_hand_only"
+    """tactile_split | tactile_hand_only | dual_split | dual_hand_only | visual_manip_nav_tactile_hand."""
+
+    visor_tactile_align_mode: str = "hold_last"
+    """hold_last | zero_pad for short tactile history padding."""
+
+    visor_use_readout_fed_gates: bool = False
+    """If True, late-flow gates use DiT tactile/visual readout (v4.1+)."""
+
+    visor_use_visual_supervision: bool = False
+    visor_visual_waypoints: int = 8
+    visor_visual_dim: int = 2
+    visor_loss_weight_visual: float = 0.03
+    visor_visual_vq_tokens: int = 1
+    visor_visual_gt_level: str = "flow"
+    """none | flow | flux_fill_flow (cached parquet) | pool."""
 
     visor_loss_weight_tactile: float = 0.1
     """Weight on Huber/BCE tactile auxiliary loss."""
 
     visor_contact_loss_weight: float = 1.0
     """Relative weight on contact BCE within tactile loss."""
+
+    visor_use_tactile_supervision: bool = True
+    """If True, supervise DiT tactile readout against tactile_gt (tactile_future)."""
 
     tune_projector: bool = True
     """If True, fine-tune the multimodal projector layers that map vision/language features to a shared space."""

@@ -11,6 +11,7 @@ atomic_seen:
   - PickPlaceCounterToStove
   - PickPlaceDrawerToCounter
   - PickPlaceSinkToCounter
+  - PickPlaceToasterOvenToCounter
   - PickPlaceToasterToCounter
   - SlideDishwasherRack
   - TurnOffStove
@@ -67,6 +68,7 @@ task_horizons:
   PickPlaceCounterToStove: 400
   PickPlaceDrawerToCounter: 500
   PickPlaceSinkToCounter: 600
+  PickPlaceToasterOvenToCounter: 500
   PickPlaceToasterToCounter: 400
   SlideDishwasherRack: 300
   TurnOffStove: 500

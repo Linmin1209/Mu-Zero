@@ -37,6 +37,7 @@ from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.interfaces import BaseProcessor
 from gr00t.data.state_action.state_action_processor import StateActionProcessor
 from gr00t.data.utils import parse_modality_configs, to_json_serializable
+from gr00t.data.visual_flow import compute_nav_flow_features, compute_waypoint_flow_features
 from gr00t.model.modules.component_action.component_schema import (
     CANONICAL_COMPONENTS,
     ComponentSchemaConfig,
@@ -153,6 +154,34 @@ class Gr00tN1d7DataCollator:
         self.use_adaptive_component_head = use_adaptive_component_head
 
     def __call__(self, features: list[Dict[str, Any]]) -> BatchFeature:
+        import logging
+
+        from gr00t.data.joint_batch import build_flux_batch_from_compact_meta
+
+        flux_build_failures = 0
+        for feat in features:
+            meta = feat.pop("_joint_flux_meta", None)
+            if meta is None or "flux_pixel_values" in feat:
+                continue
+            try:
+                flux = build_flux_batch_from_compact_meta(meta)
+                feat["flux_pixel_values"] = flux["pixel_values"]
+                feat["flux_masks"] = flux["masks"]
+                feat["flux_masked_images"] = flux["masked_images"]
+                feat["flux_prompts"] = flux["prompts"]
+            except Exception as exc:
+                flux_build_failures += 1
+                if flux_build_failures == 1:
+                    logging.getLogger(__name__).warning(
+                        "Deferred FLUX collate build failed (first error): %s", exc
+                    )
+        if flux_build_failures and not any("flux_pixel_values" in f for f in features):
+            logging.getLogger(__name__).warning(
+                "FLUX batch missing for %d/%d samples after collate",
+                flux_build_failures,
+                len(features),
+            )
+
         batch = {}
         keys = list(set().union(*(elem.keys() for elem in features)))
 
@@ -203,6 +232,19 @@ class Gr00tN1d7DataCollator:
                 batch[key] = merged
             elif key == "active_component_mask":
                 batch[key] = torch.from_numpy(np.stack(values))
+            elif key == "flux_prompts":
+                batch[key] = values
+            elif key == "tactile_mask":
+                if torch.is_tensor(values[0]):
+                    stacked = torch.stack(values)
+                else:
+                    stacked = torch.from_numpy(np.stack(values)).float()
+                batch[key] = stacked.reshape(len(values), 1).float()
+            elif key.startswith("flux_"):
+                if torch.is_tensor(values[0]):
+                    batch[key] = torch.stack(values)
+                else:
+                    batch[key] = torch.from_numpy(np.stack(values))
             else:
                 # state, state_mask, action and action_mask - stack to form batch dimension
                 batch[key] = torch.from_numpy(np.stack(values))
@@ -248,6 +290,15 @@ class Gr00tN1d7Processor(BaseProcessor):
         use_adaptive_component_head: bool = False,
         component_projector_dims: dict[str, int] | None = None,
         letter_box_transform: bool = False,
+        visor_visual_gt_level: str = "flow",
+        joint_dual_branch: bool = False,
+        joint_flux_future_delta: int = 5,
+        joint_flux_resolution: int = 256,
+        joint_flux_mask_mode: str = "keep_reference",
+        joint_build_flux_batch: bool = True,
+        vt_build_flux_batch: bool = False,
+        decouple_base_arm: bool = False,
+        visor_base_action_slice: tuple[int, int] = (7, 11),
     ):
         self.modality_configs = parse_modality_configs(modality_configs)
 
@@ -274,6 +325,18 @@ class Gr00tN1d7Processor(BaseProcessor):
         self.state_dropout_prob = state_dropout_prob
 
         self.letter_box_transform = letter_box_transform
+        self.visor_visual_gt_level = visor_visual_gt_level
+        self.joint_dual_branch = joint_dual_branch
+        self.joint_flux_future_delta = joint_flux_future_delta
+        self.joint_flux_resolution = joint_flux_resolution
+        self.joint_flux_mask_mode = joint_flux_mask_mode
+        self.joint_build_flux_batch = joint_build_flux_batch
+        self.vt_build_flux_batch = vt_build_flux_batch
+        self.decouple_base_arm = decouple_base_arm
+        self.visor_base_action_slice = (
+            int(visor_base_action_slice[0]),
+            int(visor_base_action_slice[1]),
+        )
 
         # Save VLM settings
         self.formalize_language = formalize_language
@@ -734,6 +797,9 @@ class Gr00tN1d7Processor(BaseProcessor):
                 action_mask = torch.ones_like(normalized_actions)
                 action_mask[action_horizon:] = 0
                 action_mask[:, action_dim:] = 0
+                if self.decouple_base_arm:
+                    b0, b1 = self.visor_base_action_slice
+                    action_mask[:, b0:b1] = 0.0
         else:
             assert not self.training, "Action is required in training mode"
             normalized_actions = None
@@ -862,6 +928,101 @@ class Gr00tN1d7Processor(BaseProcessor):
             elif tactile_future.shape[0] > self.max_action_horizon:
                 tactile_future = tactile_future[: self.max_action_horizon]
             transformed_inputs["tactile_gt"] = torch.from_numpy(tactile_future).to(torch.float32)
+
+        if content.metadata.get("tactile_valid") is not None:
+            valid = float(content.metadata["tactile_valid"])
+            transformed_inputs["tactile_mask"] = torch.tensor([[valid]], dtype=torch.float32)
+        elif transformed_inputs.get("tactile_gt") is not None:
+            transformed_inputs["tactile_mask"] = torch.tensor([[1.0]], dtype=torch.float32)
+
+        video_future_manip = content.metadata.get("video_future_manip")
+        video_future_nav = content.metadata.get("video_future_nav")
+        visual_future = content.metadata.get("visual_future")
+        gt_level = str(getattr(self, "visor_visual_gt_level", "flow"))
+
+        def _flow_tensor(arr: np.ndarray) -> torch.Tensor:
+            a = np.asarray(arr, dtype=np.float32)
+            if a.ndim == 1:
+                a = a.reshape(-1, 2)
+            return torch.from_numpy(a).to(torch.float32)
+
+        if visual_future is not None and gt_level in ("flux_fill_flow", "pool"):
+            if "manip" in visual_future:
+                transformed_inputs["visual_gt_manip"] = _flow_tensor(visual_future["manip"])
+                transformed_inputs["visual_gt_hand"] = transformed_inputs["visual_gt_manip"]
+            if "nav" in visual_future:
+                transformed_inputs["visual_gt_nav"] = _flow_tensor(visual_future["nav"])
+        elif gt_level in ("flow", "flux_fill_flow") and video_future_manip is not None:
+            eye_key = "robot0_eye_in_hand"
+            if eye_key in video_future_manip:
+                manip_flow = compute_waypoint_flow_features(video_future_manip[eye_key])
+                transformed_inputs["visual_gt_manip"] = torch.from_numpy(manip_flow).to(
+                    torch.float32
+                )
+                transformed_inputs["visual_gt_hand"] = transformed_inputs["visual_gt_manip"]
+            if video_future_nav is not None:
+                left_key = "robot0_agentview_left"
+                right_key = "robot0_agentview_right"
+                if left_key in video_future_nav and right_key in video_future_nav:
+                    nav_flow = compute_nav_flow_features(
+                        video_future_nav[left_key],
+                        video_future_nav[right_key],
+                    )
+                    transformed_inputs["visual_gt_nav"] = torch.from_numpy(nav_flow).to(
+                        torch.float32
+                    )
+        if video_future_manip is not None and self._wants_flux_batch():
+            if getattr(self, "joint_build_flux_batch", True) or getattr(
+                self, "vt_build_flux_batch", False
+            ):
+                flux_built = False
+                flux_err: Exception | None = None
+                try:
+                    from gr00t.data.joint_batch import build_flux_batch_from_vla_metadata
+
+                    flux = build_flux_batch_from_vla_metadata(
+                        content.metadata,
+                        future_delta=int(getattr(self, "joint_flux_future_delta", 5)),
+                        resolution=int(getattr(self, "joint_flux_resolution", 256)),
+                        mask_mode=str(getattr(self, "joint_flux_mask_mode", "keep_reference")),
+                    )
+                    transformed_inputs["flux_pixel_values"] = flux["pixel_values"]
+                    transformed_inputs["flux_masks"] = flux["masks"]
+                    transformed_inputs["flux_masked_images"] = flux["masked_images"]
+                    transformed_inputs["flux_prompts"] = flux["prompts"]
+                    flux_built = True
+                except Exception as exc:
+                    flux_err = exc
+                if not flux_built:
+                    try:
+                        from gr00t.data.joint_batch import compact_flux_meta_from_vla_metadata
+
+                        transformed_inputs["_joint_flux_meta"] = compact_flux_meta_from_vla_metadata(
+                            content.metadata,
+                            future_delta=int(getattr(self, "joint_flux_future_delta", 5)),
+                            resolution=int(getattr(self, "joint_flux_resolution", 256)),
+                            mask_mode=str(getattr(self, "joint_flux_mask_mode", "keep_reference")),
+                        )
+                    except Exception as exc2:
+                        logging.getLogger(__name__).warning(
+                            "VT FLUX batch build failed (eager=%s, deferred=%s)",
+                            flux_err,
+                            exc2,
+                        )
+            else:
+                try:
+                    from gr00t.data.joint_batch import compact_flux_meta_from_vla_metadata
+
+                    transformed_inputs["_joint_flux_meta"] = compact_flux_meta_from_vla_metadata(
+                        content.metadata,
+                        future_delta=int(getattr(self, "joint_flux_future_delta", 5)),
+                        resolution=int(getattr(self, "joint_flux_resolution", 256)),
+                        mask_mode=str(getattr(self, "joint_flux_mask_mode", "keep_reference")),
+                    )
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "VT FLUX deferred meta build failed: %s", exc
+                    )
         # Add VLM inputs
         transformed_inputs.update(vlm_inputs)
         transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]
@@ -922,6 +1083,14 @@ class Gr00tN1d7Processor(BaseProcessor):
         vlm_inputs["num_views"] = len(image_keys)
         return vlm_inputs
 
+    def _wants_flux_batch(self) -> bool:
+        """True when this processor should attach FLUX Fill tensors to each sample."""
+        return bool(
+            getattr(self, "joint_dual_branch", False)
+            or getattr(self, "vt_build_flux_batch", False)
+            or getattr(self, "joint_build_flux_batch", False)
+        )
+
     def save_pretrained(self, save_directory: str | Path) -> list[Path]:
         save_directory = Path(save_directory)
         save_directory.mkdir(parents=True, exist_ok=True)
@@ -962,6 +1131,16 @@ class Gr00tN1d7Processor(BaseProcessor):
                 # State augmentation
                 "exclude_state": self.exclude_state,
                 "state_dropout_prob": self.state_dropout_prob,
+                # Joint / VT FLUX batch
+                "joint_dual_branch": getattr(self, "joint_dual_branch", False),
+                "joint_build_flux_batch": getattr(self, "joint_build_flux_batch", True),
+                "joint_flux_future_delta": getattr(self, "joint_flux_future_delta", 5),
+                "joint_flux_resolution": getattr(self, "joint_flux_resolution", 256),
+                "joint_flux_mask_mode": getattr(self, "joint_flux_mask_mode", "keep_reference"),
+                "vt_build_flux_batch": getattr(self, "vt_build_flux_batch", False),
+                "decouple_base_arm": getattr(self, "decouple_base_arm", False),
+                "visor_base_action_slice": getattr(self, "visor_base_action_slice", (7, 11)),
+                "visor_visual_gt_level": getattr(self, "visor_visual_gt_level", "flow"),
             },
         }
         with open(main_config_file, "w") as f:
@@ -1053,6 +1232,15 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "max_action_dim",
                 "use_adaptive_component_head",
                 "component_projector_dims",
+                "visor_visual_gt_level",
+                "joint_dual_branch",
+                "joint_build_flux_batch",
+                "joint_flux_future_delta",
+                "joint_flux_resolution",
+                "joint_flux_mask_mode",
+                "vt_build_flux_batch",
+                "decouple_base_arm",
+                "visor_base_action_slice",
             ]
             for key in override_keys:
                 if key in kwargs:

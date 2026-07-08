@@ -1,0 +1,89 @@
+# DexJoCo task registry: prompts, robot type, eval camera mapping.
+
+tasks:
+  bimanual_assembly:
+    robot_type: bimanual
+    prompt: "Grasp the tray with the left hand and the peg with the right hand, then insert the peg into the hole."
+    camera_mapping:
+      base: ego
+      wrist_left: wrist_left
+      wrist_right: wrist_right
+  bimanual_hanoi:
+    robot_type: bimanual
+    prompt: "Execute the final two moves of the three-level Tower of Hanoi: move the medium disk from the middle peg to the right peg with the right hand, then move the small disk from the left peg to the right peg with the left hand."
+    camera_mapping:
+      base: ego
+      wrist_left: wrist_left
+      wrist_right: wrist_right
+  bimanual_microwave_cook:
+    robot_type: bimanual
+    prompt: "Open the microwave door, place the food inside the microwave, close the door, and press the start button."
+    camera_mapping:
+      base: ego
+      wrist_left: wrist_left
+      wrist_right: wrist_right
+  bimanual_photograph:
+    robot_type: bimanual
+    prompt: "Grasp the camera with the left hand, align it with the logo, and press the shutter button with the right hand."
+    camera_mapping:
+      base: ego
+      wrist_left: wrist_left
+      wrist_right: wrist_right
+  bimanual_unlock_ipad:
+    robot_type: bimanual
+    prompt: "Grasp the iPad and enter the password 123 to unlock the device."
+    camera_mapping:
+      base: ego
+      wrist_left: wrist_left
+      wrist_right: wrist_right
+  click_mouse:
+    robot_type: single_arm
+    prompt: "Move the mouse to the purple mouse pad and click the left mouse button."
+    camera_mapping:
+      base: ego_right
+      wrist: wrist
+  fold_glasses:
+    robot_type: single_arm
+    prompt: "Fold the glasses and place them into the case."
+    camera_mapping:
+      base: front
+      wrist: wrist
+  hammer_nail:
+    robot_type: single_arm
+    prompt: "Use the hammer to drive the nail into the wooden board."
+    camera_mapping:
+      base: front
+      wrist: wrist
+  pick_bucket:
+    robot_type: single_arm
+    prompt: "Place the boxed food into the bucket and then lift the bucket."
+    camera_mapping:
+      base: front
+      wrist: wrist
+  pinch_tongs:
+    robot_type: single_arm
+    prompt: "Grasp the tongs and perform three consecutive open-close motions."
+    camera_mapping:
+      base: front
+      wrist: wrist
+  water_plant:
+    robot_type: single_arm
+    prompt: "Grasp the watering can and apply water to the plant."
+    camera_mapping:
+      base: front
+      wrist: wrist
+
+single_arm_tasks:
+  - click_mouse
+  - fold_glasses
+  - hammer_nail
+  - pick_bucket
+  - pinch_tongs
+  - water_plant
+
+bimanual_tasks:
+  - bimanual_assembly
+  - bimanual_hanoi
+  - bimanual_microwave_cook
+  - bimanual_photograph
+  - bimanual_unlock_ipad

@@ -55,29 +55,75 @@ class MotionConfig:
     tune_motion: bool = True
     motion_use_gating: bool = True
     motion_gate_hidden: int = 256
+    motion_gate_init_bias: float = 0.0
+    motion_gate_mode: str = "text_only"
+    motion_gate_g_min: float = 0.0
+    motion_gate_g_max: float = 0.8
+    motion_gate_lr_scale: float = 5.0
 
 
 class MotionFusionGate(nn.Module):
-    """Scalar gate per batch: h' = h + g * moss_delta."""
+    """Scalar gate per batch: h' = h + g * moss_delta.
+
+    Default ``text_only`` mode uses LayerNorm(language) only so task instructions
+    can open/close MOSS per task instead of collapsing to a global constant.
+    """
 
     def __init__(
         self,
         vision_dim: int,
         text_dim: int | None = None,
         hidden_dim: int = 256,
+        init_bias: float = 0.0,
+        mode: str = "text_only",
+        g_min: float = 0.0,
+        g_max: float = 0.8,
     ):
         super().__init__()
+        if mode not in ("text_only", "full"):
+            raise ValueError(f"motion_gate_mode must be 'text_only' or 'full', got {mode!r}")
+        if g_max <= g_min:
+            raise ValueError(f"motion_gate_g_max ({g_max}) must exceed g_min ({g_min})")
+
         text_dim = vision_dim if text_dim is None else text_dim
         self.vision_dim = vision_dim
         self.text_dim = text_dim
-        in_dim = text_dim + vision_dim * 2
+        self.init_bias = float(init_bias)
+        self.mode = mode
+        self.g_min = float(g_min)
+        self.g_max = float(g_max)
+        self.text_norm = nn.LayerNorm(text_dim)
+
+        in_dim = text_dim if mode == "text_only" else text_dim + vision_dim * 2
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.constant_(self.net[-1].bias, 3.0)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for idx, module in enumerate(self.net):
+            if not isinstance(module, nn.Linear):
+                continue
+            is_last = idx == len(self.net) - 1
+            gain = 0.1 if is_last else 1.0
+            nn.init.xavier_uniform_(module.weight, gain=gain)
+            if is_last:
+                nn.init.constant_(module.bias, self.init_bias)
+            else:
+                nn.init.zeros_(module.bias)
+
+    def _gate_inputs(
+        self,
+        text_ctx: torch.Tensor,
+        vision_ctx: torch.Tensor,
+        temporal_ctx: torch.Tensor,
+    ) -> torch.Tensor:
+        text_feat = self.text_norm(text_ctx)
+        if self.mode == "text_only":
+            return text_feat
+        return torch.cat([text_feat, vision_ctx, temporal_ctx], dim=-1)
 
     def forward(
         self,
@@ -85,7 +131,8 @@ class MotionFusionGate(nn.Module):
         vision_ctx: torch.Tensor,
         temporal_ctx: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.sigmoid(self.net(torch.cat([text_ctx, vision_ctx, temporal_ctx], dim=-1)))
+        logit = self.net(self._gate_inputs(text_ctx, vision_ctx, temporal_ctx))
+        return self.g_min + (self.g_max - self.g_min) * torch.sigmoid(logit)
 
 
 def _pool_hidden_for_gate(hidden_5d: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -335,8 +382,15 @@ def resolve_motion_text_hidden_size(model_or_config: Any) -> int | None:
     return hidden if hidden > 0 else None
 
 
-def _motion_gate_input_dim(vision_dim: int, text_dim: int | None) -> int:
+def _motion_gate_input_dim(
+    vision_dim: int,
+    text_dim: int | None,
+    *,
+    mode: str = "text_only",
+) -> int:
     text_dim = vision_dim if text_dim is None else text_dim
+    if mode == "text_only":
+        return text_dim
     return text_dim + vision_dim * 2
 
 
@@ -350,31 +404,57 @@ def ensure_motion_gate(
         return
     vision_dim = visual.config.hidden_size
     text_dim = text_hidden_size or vision_dim
-    expected_in = _motion_gate_input_dim(vision_dim, text_dim)
+    gate_mode = getattr(config, "motion_gate_mode", "text_only")
+    expected_in = _motion_gate_input_dim(vision_dim, text_dim, mode=gate_mode)
+    g_min = float(getattr(config, "motion_gate_g_min", 0.0))
+    g_max = float(getattr(config, "motion_gate_g_max", 0.8))
 
     existing = getattr(visual, "motion_gate", None)
     if existing is not None:
         first_linear = existing.net[0]
-        if isinstance(first_linear, nn.Linear) and first_linear.in_features == expected_in:
+        same_shape = (
+            isinstance(first_linear, nn.Linear)
+            and first_linear.in_features == expected_in
+            and getattr(existing, "mode", "full") == gate_mode
+            and getattr(existing, "g_min", 0.0) == g_min
+            and getattr(existing, "g_max", 1.0) == g_max
+        )
+        if same_shape:
             return
         logger.warning(
-            "Replacing MotionFusionGate (in_features %s -> %s; text=%s vision=%s)",
+            "Replacing MotionFusionGate (mode=%s in=%s->%s g=[%.3f,%.3f])",
+            getattr(existing, "mode", "?"),
             getattr(first_linear, "in_features", "?"),
             expected_in,
-            text_dim,
-            vision_dim,
+            g_min,
+            g_max,
         )
 
     visual.motion_gate = MotionFusionGate(
-        vision_dim, text_dim, config.motion_gate_hidden
+        vision_dim,
+        text_dim,
+        config.motion_gate_hidden,
+        init_bias=config.motion_gate_init_bias,
+        mode=gate_mode,
+        g_min=g_min,
+        g_max=g_max,
     )
     visual._gr00t_motion_text_context = None
+    init_g = g_min + (g_max - g_min) * float(
+        torch.sigmoid(torch.tensor(config.motion_gate_init_bias))
+    )
     logger.info(
-        "Installed MotionFusionGate (text=%s vision=%s in=%s gate_hidden=%s)",
+        "Installed MotionFusionGate (mode=%s text=%s vision=%s in=%s hidden=%s "
+        "init_bias=%s g_range=[%.3f,%.3f] init_g≈%.3f)",
+        gate_mode,
         text_dim,
         vision_dim,
         expected_in,
         config.motion_gate_hidden,
+        config.motion_gate_init_bias,
+        g_min,
+        g_max,
+        init_g,
     )
 
 
@@ -421,7 +501,7 @@ def install_motion_module(
     visual.motion_block.initialize_weights()
     if config.motion_use_gating:
         ensure_motion_gate(visual, config, text_hidden_size=text_hidden_size)
-        logger.info("MOSS fusion: task-modality gated residual")
+        logger.info("MOSS fusion: text-conditional gated residual")
     else:
         visual.motion_gate = None
     logger.info(
@@ -470,6 +550,49 @@ def set_motion_trainable(visual: Any, tune_motion: bool, tune_visual: bool) -> N
                 param.requires_grad = False
 
 
+def finalize_motion_trainable(
+    backbone: Any,
+    *,
+    tune_visual: bool,
+    tune_motion: bool,
+    trainable_fp32: bool = True,
+) -> dict[str, int]:
+    """Re-sync motion_block / motion_gate trainability after post-load install or gate replace.
+
+    ``set_trainable_parameters`` runs in backbone ``__init__`` before checkpoint-specific
+    ``ensure_motion_gate`` may replace ``motion_gate`` with a new module whose parameters
+    default to ``requires_grad=True`` but can miss the fp32 cast — or, if ``tune_motion``
+    is False, remain incorrectly trainable. Call this once model weights are finalized.
+    """
+    visual = backbone.model.visual
+    set_motion_trainable(visual, tune_motion, tune_visual)
+    stats = {"motion_block": 0, "motion_gate": 0}
+    for name, param in backbone.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "motion_gate" in name:
+            stats["motion_gate"] += param.numel()
+        elif "motion_block" in name:
+            stats["motion_block"] += param.numel()
+        if trainable_fp32 and param.requires_grad and param.dtype != torch.float32:
+            if "motion_gate" in name or "motion_block" in name:
+                param.data = param.data.to(torch.float32)
+    logger.info(
+        "Motion trainable sync: tune_motion=%s tune_visual=%s | "
+        "motion_block=%s params, motion_gate=%s params",
+        tune_motion,
+        tune_visual,
+        f"{stats['motion_block']:,}",
+        f"{stats['motion_gate']:,}",
+    )
+    if tune_motion and not tune_visual and stats["motion_gate"] == 0:
+        logger.warning(
+            "motion_use_gating=True but zero motion_gate trainable params — "
+            "MOSS gate will not receive optimizer updates."
+        )
+    return stats
+
+
 def motion_state_dict_prefixes() -> tuple[str, ...]:
     return (
         "motion_block.",
@@ -506,4 +629,9 @@ def motion_config_from_model_config(config: Any) -> MotionConfig:
         tune_motion=getattr(config, "tune_motion", True),
         motion_use_gating=getattr(config, "motion_use_gating", True),
         motion_gate_hidden=getattr(config, "motion_gate_hidden", 256),
+        motion_gate_init_bias=getattr(config, "motion_gate_init_bias", 0.0),
+        motion_gate_mode=getattr(config, "motion_gate_mode", "text_only"),
+        motion_gate_g_min=getattr(config, "motion_gate_g_min", 0.0),
+        motion_gate_g_max=getattr(config, "motion_gate_g_max", 0.8),
+        motion_gate_lr_scale=getattr(config, "motion_gate_lr_scale", 5.0),
     )

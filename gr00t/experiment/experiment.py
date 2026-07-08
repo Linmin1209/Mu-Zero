@@ -37,6 +37,22 @@ from gr00t.experiment.utils import BestMetricCheckpointCallback, CheckpointForma
 from gr00t.model import MODEL_REGISTRY
 from gr00t.utils.initial_actions import INITIAL_ACTIONS_FILENAME, save_initial_actions
 
+_JOINT_TRAINER = None
+_JOINT_MODEL = None
+_JOINT_CFG = None
+
+
+def _load_joint_modules():
+    global _JOINT_TRAINER, _JOINT_MODEL, _JOINT_CFG
+    if _JOINT_TRAINER is None:
+        from gr00t.configs.joint_finetune_config import joint_finetune_config_from_run
+        from gr00t.experiment.joint_train.joint_model import JointDualBranchModel
+        from gr00t.experiment.joint_train.joint_trainer import JointGr00tTrainer
+
+        _JOINT_TRAINER = JointGr00tTrainer
+        _JOINT_MODEL = JointDualBranchModel
+        _JOINT_CFG = joint_finetune_config_from_run
+
 
 def setup_logging(debug: bool = False):
     """Configure logging."""
@@ -228,6 +244,19 @@ def run(config: Config):
     pipeline = MODEL_REGISTRY.get(type(config.model))(config, save_cfg_dir)
     pipeline.setup()
     model = pipeline.return_model()
+    if getattr(config.model, "use_joint_dual_branch", False):
+        _load_joint_modules()
+        joint_cfg = _JOINT_CFG(config)
+        model = _JOINT_MODEL(model, joint_cfg)
+        logging.info(
+            "MoT joint enabled: mode=%s decouple_base_arm=%s alpha/beta phase1=%s/%s phase2=%s/%s",
+            joint_cfg.joint_train_mode,
+            getattr(config.model, "decouple_base_arm", False),
+            joint_cfg.joint_alpha_phase1,
+            joint_cfg.joint_beta_phase1,
+            joint_cfg.joint_alpha_phase2,
+            joint_cfg.joint_beta_phase2,
+        )
     train_dataset, eval_dataset = pipeline.return_dataset()
     data_collator = pipeline.return_collator()
     processor = pipeline.return_processor()
@@ -288,7 +317,12 @@ def run(config: Config):
     )
 
     # Create trainer
-    trainer = Gr00tTrainer(
+    trainer_cls = Gr00tTrainer
+    if getattr(config.model, "use_joint_dual_branch", False):
+        _load_joint_modules()
+        trainer_cls = _JOINT_TRAINER
+
+    trainer = trainer_cls(
         model=model,
         args=training_args,
         train_dataset=train_dataset,

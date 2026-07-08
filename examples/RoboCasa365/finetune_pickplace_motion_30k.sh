@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Finetune GR00T N1.7 on RoboCasa365 PickPlaceToasterToCounter (30k steps) with STSS/MOSS.
-# Video: 4-frame history delta_indices [-6, -4, -2, 0] (see robocasa365_config_4frame.py).
+# Native GR00T N1.7 + MOSS/MotionFusionGate on RoboCasa365 PickPlaceToasterToCounter (30k).
+# Uses launch_finetune.py → Gr00tN1d7ActionHead (no VT / no VISOR / no tactile / no FLUX).
+# Video: 4-frame history delta_indices [-6, -4, -2, 0] (robocasa365_config_4frame.py).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +18,7 @@ LOG_FILE="${LOG_FILE:-$OUTPUT_DIR/train.log}"
 
 NUM_GPUS="${NUM_GPUS:-1}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-MAX_STEPS=30000
+MAX_STEPS="${MAX_STEPS:-30000}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-16}"
 SAVE_STEPS="${SAVE_STEPS:-5000}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-10}"
@@ -26,6 +27,9 @@ DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-8}"
 USE_MOTION="${USE_MOTION:-1}"
 MOTION_INSERT_LAYER="${MOTION_INSERT_LAYER:-9}"
 TUNE_MOTION="${TUNE_MOTION:-1}"
+MOTION_USE_GATING="${MOTION_USE_GATING:-1}"
+MOTION_GATE_INIT_BIAS="${MOTION_GATE_INIT_BIAS:-1.5}"
+MOTION_GATE_HIDDEN="${MOTION_GATE_HIDDEN:-256}"
 
 cd "$PROJECT_ROOT"
 mkdir -p "$OUTPUT_DIR"
@@ -35,8 +39,9 @@ echo "[i] dataset: $ROBOCASA365_ROOT"
 echo "[i] base model: $GR00T_BASE_MODEL"
 echo "[i] Task: $ROBOCASA365_TASKS"
 echo "[i] Split/category: $ROBOCASA365_SPLIT / $ROBOCASA365_CATEGORY"
-echo "[i] modality config: $MODALITY_CONFIG (video delta [-6,-4,-2,0])"
-echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION"
+echo "[i] modality config: $MODALITY_CONFIG (4-frame video, native — no tactile/FLUX)"
+echo "[i] use_motion=$USE_MOTION motion_insert_layer=$MOTION_INSERT_LAYER tune_motion=$TUNE_MOTION motion_use_gating=$MOTION_USE_GATING motion_gate_mode=$MOTION_GATE_MODE motion_gate_g=[$MOTION_GATE_G_MIN,$MOTION_GATE_G_MAX] motion_gate_init_bias=$MOTION_GATE_INIT_BIAS"
+echo "[i] action head: native Gr00tN1d7ActionHead (no VT, no VISOR)"
 echo "[i] max_steps=$MAX_STEPS global_batch_size=$GLOBAL_BATCH_SIZE num_gpus=$NUM_GPUS (motion default b16 + grad ckpt + frozen-vision no_grad)"
 echo "[i] output: $OUTPUT_DIR"
 echo "[i] log: $LOG_FILE"
@@ -50,7 +55,10 @@ if [[ "$USE_MOTION" == "1" ]]; then
   else
     MOTION_ARGS+=(--no-tune-motion)
   fi
+  append_motion_gate_cli_args MOTION_ARGS
 fi
+
+NATIVE_ARGS=(--no-use-vt-closed-loop --no-use-visor)
 
 run_train() {
   if [[ "$NUM_GPUS" -eq 1 ]]; then
@@ -69,6 +77,7 @@ run_train() {
       --save-steps "$SAVE_STEPS" \
       --save-total-limit "$SAVE_TOTAL_LIMIT" \
       --dataloader-num-workers "$DATALOADER_NUM_WORKERS" \
+      "${NATIVE_ARGS[@]}" \
       "${MOTION_ARGS[@]}"
   else
     CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" .venv/bin/python -u -m torch.distributed.run \
@@ -89,6 +98,7 @@ run_train() {
       --save-steps "$SAVE_STEPS" \
       --save-total-limit "$SAVE_TOTAL_LIMIT" \
       --dataloader-num-workers "$DATALOADER_NUM_WORKERS" \
+      "${NATIVE_ARGS[@]}" \
       "${MOTION_ARGS[@]}"
   fi
 }

@@ -549,11 +549,31 @@ class Gr00tN1d7(PreTrainedModel):
         )
 
         # Initialize action head
-        if getattr(config, "use_adaptive_component_head", False):
+        if getattr(config, "use_vt_closed_loop", False):
+            from gr00t.model.modules.vt_closed_loop.vt_closed_loop_action_head import (
+                build_vt_closed_loop_action_head,
+            )
+
+            self.action_head = build_vt_closed_loop_action_head(Gr00tN1d7ActionHead)(config)
+            logger.info(
+                "Using VTClosedLoopActionHead (no VISOR; MOSS use_motion=%s)",
+                getattr(config, "use_motion", False),
+            )
+        elif getattr(config, "use_adaptive_component_head", False):
             self.action_head = AdaptiveEmbodimentActionHead(config)
             logger.info("Using AdaptiveEmbodimentActionHead (component-level MSAT decoder)")
         elif getattr(config, "use_visor", False):
-            if getattr(config, "use_component_factored_head", False):
+            if getattr(config, "use_joint_dual_branch", False):
+                from gr00t.model.modules.visor.visor_mot_joint_action_head import (
+                    build_visor_mot_joint_action_head,
+                )
+
+                self.action_head = build_visor_mot_joint_action_head(Gr00tN1d7ActionHead)(config)
+                logger.info(
+                    "Using VisorMotJointActionHead "
+                    "(shared DiT MoT inpaint + action denoise + asymmetric SA mask)"
+                )
+            elif getattr(config, "use_component_factored_head", False):
                 from gr00t.model.modules.visor.visor_factored_action_head import (
                     build_visor_factored_action_head,
                 )
@@ -615,10 +635,11 @@ class Gr00tN1d7(PreTrainedModel):
 
         # Move to device and dtype
         def to_device_with_dtype(x):
+            if not isinstance(x, torch.Tensor):
+                return x
             if torch.is_floating_point(x):
                 return x.to(self.device, dtype=self.dtype)
-            else:
-                return x.to(self.device)
+            return x.to(self.device)
 
         backbone_inputs = tree.map_structure(to_device_with_dtype, backbone_inputs)
         action_inputs = tree.map_structure(to_device_with_dtype, action_inputs)

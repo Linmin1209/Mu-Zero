@@ -9,7 +9,8 @@
 #   ROBOCASA365_ROOT=/path/to/robocasa365-datasets
 #   MODELSCOPE_REPO=Twilighted/Robocasa365-tactile
 #   PARALLEL_TASKS=2
-#   MAX_WORKERS=16
+#   FORCE_REUPLOAD=1
+#   USE_UPLOAD_CACHE=0   # disable skip-cache; required for LFS blob fix
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,8 +21,17 @@ MODELSCOPE_REPO="${MODELSCOPE_REPO:-Twilighted/Robocasa365-tactile}"
 MODELSCOPE_TOKEN="${MODELSCOPE_TOKEN:-${MS_TOKEN:-}}"
 PARALLEL_TASKS="${PARALLEL_TASKS:-2}"
 MAX_WORKERS="${MAX_WORKERS:-16}"
+FORCE_REUPLOAD="${FORCE_REUPLOAD:-0}"
+USE_UPLOAD_CACHE="${USE_UPLOAD_CACHE:-1}"
 LOG_DIR="${LOG_DIR:-$PROJECT_ROOT/output/modelscope_upload}"
 PROGRESS_FILE="${PROGRESS_FILE:-$LOG_DIR/upload_progress.txt}"
+UPLOAD_EXCLUDES=(
+  "**/._____temp/**"
+  "**/.msc"
+  "**/.mv"
+  "**/.ms_upload_cache/**"
+  "**/.ms_upload_cache"
+)
 
 if [[ -z "$MODELSCOPE_TOKEN" ]]; then
   echo "Set MODELSCOPE_TOKEN (ModelScope access token)." >&2
@@ -31,10 +41,17 @@ fi
 mkdir -p "$LOG_DIR"
 touch "$PROGRESS_FILE"
 
+if [[ "$USE_UPLOAD_CACHE" == "0" ]]; then
+  export UPLOAD_USE_CACHE=false
+  echo "[i] UPLOAD_USE_CACHE=false (force re-upload LFS blobs)"
+else
+  export UPLOAD_USE_CACHE=true
+fi
+
 upload_one() {
   local local_path="$1"
   local path_in_repo="$2"
-  if grep -Fxq "OK $path_in_repo" "$PROGRESS_FILE"; then
+  if [[ "$FORCE_REUPLOAD" != "1" ]] && grep -Fxq "OK $path_in_repo" "$PROGRESS_FILE"; then
     echo "[skip] $path_in_repo"
     return 0
   fi
@@ -44,8 +61,8 @@ upload_one() {
     --repo-type dataset \
     --token "$MODELSCOPE_TOKEN" \
     --max-workers "$MAX_WORKERS" \
-    --exclude "**/._____temp/**" "**/.msc" "**/.mv" \
-    --commit-message "add ${path_in_repo} (tactile labels)" \
+    --exclude "${UPLOAD_EXCLUDES[@]}" \
+    --commit-message "fix LFS blob: reupload ${path_in_repo}" \
     >"$task_log" 2>&1; then
     echo "OK $path_in_repo" >>"$PROGRESS_FILE"
     echo "[ok] $path_in_repo"
@@ -57,15 +74,16 @@ upload_one() {
 }
 
 export -f upload_one
-export MODELSCOPE_REPO MODELSCOPE_TOKEN MAX_WORKERS LOG_DIR PROGRESS_FILE
+export MODELSCOPE_REPO MODELSCOPE_TOKEN MAX_WORKERS LOG_DIR PROGRESS_FILE FORCE_REUPLOAD
 
 # Root metadata (small files only).
 for f in README.md .gitattributes; do
   if [[ -f "$ROBOCASA365_ROOT/$f" ]]; then
-    if ! grep -Fxq "OK $f" "$PROGRESS_FILE"; then
+    if [[ "$FORCE_REUPLOAD" == "1" ]] || ! grep -Fxq "OK $f" "$PROGRESS_FILE"; then
       modelscope upload "$MODELSCOPE_REPO" "$ROBOCASA365_ROOT/$f" "$f" \
         --repo-type dataset --token "$MODELSCOPE_TOKEN" \
-        --commit-message "add $f" \
+        --exclude "${UPLOAD_EXCLUDES[@]}" \
+        --commit-message "reupload $f" \
         >>"$LOG_DIR/upload_root.log" 2>&1 && echo "OK $f" >>"$PROGRESS_FILE"
     fi
   fi

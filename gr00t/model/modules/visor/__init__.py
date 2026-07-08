@@ -1,17 +1,31 @@
 from gr00t.model.modules.visor.visor import (
+    TactileIHTEncoder,
     TactileVectorQuantizer,
     TriPathTactileEncoder,
     VisorModule,
+    VisualIHTEncoder,
     align_tactile_horizon,
     build_asymmetric_sa_mask,
+    compute_tactile_gt_stats,
+    compute_tactile_sample_mask,
+    compute_visor_aux_scales,
+    compute_visor_tactile_training_loss,
+    compute_visor_visual_training_loss,
     resolve_sensor_tactile,
 )
 
 __all__ = [
+    "TactileIHTEncoder",
     "TactileVectorQuantizer",
     "TriPathTactileEncoder",
     "VisorModule",
+    "VisualIHTEncoder",
     "align_tactile_horizon",
     "build_asymmetric_sa_mask",
+    "compute_tactile_gt_stats",
+    "compute_tactile_sample_mask",
+    "compute_visor_aux_scales",
+    "compute_visor_tactile_training_loss",
+    "compute_visor_visual_training_loss",
     "resolve_sensor_tactile",
 ]

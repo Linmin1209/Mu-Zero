@@ -30,6 +30,7 @@ from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7
 from gr00t.model.gr00t_n1d7.processing_gr00t_n1d7 import Gr00tN1d7Processor
 from gr00t.model.modules.qwen3_motion import (
     ensure_motion_gate,
+    finalize_motion_trainable,
     is_motion_missing_key,
     motion_config_from_model_config,
     resolve_motion_text_hidden_size,
@@ -62,8 +63,16 @@ def _is_component_factored_decoder_key(key: str) -> bool:
     )
 
 
+def _is_vt_closed_loop_key(key: str) -> bool:
+    return key.startswith("action_head.vt_policy.") or key.startswith(
+        "action_head.flux_teacher."
+    )
+
+
 def _is_visor_key(key: str) -> bool:
-    return key.startswith("action_head.visor.")
+    return key.startswith("action_head.visor.") or key.startswith(
+        "action_head.inpaint_expert."
+    )
 
 
 def _is_flat_action_decoder_key(key: str) -> bool:
@@ -183,6 +192,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 self.config.model.backbone_trainable_params_fp32
             )
             model_cfg.load_bf16 = self.config.model.load_bf16
+            model_cfg.use_flash_attention = getattr(
+                self.config.model, "use_flash_attention", True
+            )
             for motion_field in (
                 "use_motion",
                 "motion_insert_layer",
@@ -202,9 +214,60 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 "tune_motion",
                 "motion_use_gating",
                 "motion_gate_hidden",
+                "motion_gate_init_bias",
+                "motion_gate_mode",
+                "motion_gate_g_min",
+                "motion_gate_g_max",
+                "motion_gate_lr_scale",
             ):
                 if hasattr(self.config.model, motion_field):
                     setattr(model_cfg, motion_field, getattr(self.config.model, motion_field))
+            for vt_field in (
+                "use_vt_closed_loop",
+                "decouple_base_arm",
+                "vt_tactile_dim",
+                "vt_tactile_history_len",
+                "vt_tactile_num_tokens",
+                "vt_tactile_use_pressure_map",
+                "vt_num_intent_tokens",
+                "vt_num_intent_phases",
+                "vt_num_route_modes",
+                "vt_num_global_intent_tokens",
+                "vt_num_motion_intent_tokens",
+                "vt_num_contact_intent_tokens",
+                "vt_num_recovery_intent_tokens",
+                "vt_tactile_refiner_layers",
+                "vt_tactile_refiner_heads",
+                "vt_enable_intent_adapter",
+                "vt_enable_tactile_encoder",
+                "vt_enable_contact_gate",
+                "vt_enable_structured_action_dit",
+                "vt_enable_future_head",
+                "vt_num_future_tokens",
+                "vt_action_decoder_use_future_tokens",
+                "vt_detach_future_tokens",
+                "vt_detach_vlm_for_refiner",
+                "vt_action_clamp",
+                "vt_closed_loop_stage",
+                "vt_enable_tactile_refiner",
+                "vt_enable_execution_monitor",
+                "vt_enable_recovery_expert",
+                "vt_use_flux_teacher",
+                "vt_build_flux_batch",
+                "vt_flux_model_path",
+                "vt_flux_future_delta",
+                "vt_flux_resolution",
+                "vt_flux_mask_mode",
+                "vt_loss_action",
+                "vt_loss_future",
+                "vt_loss_flux",
+                "vt_loss_contact",
+                "vt_loss_recovery",
+                "vt_loss_router",
+                "vt_loss_intent_diversity",
+            ):
+                if hasattr(self.config.model, vt_field):
+                    setattr(model_cfg, vt_field, getattr(self.config.model, vt_field))
             for adaptive_field in (
                 "use_adaptive_component_head",
                 "use_component_factored_head",
@@ -218,16 +281,32 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 "visor_use_semantic_gate",
                 "visor_use_split_action_gates",
                 "visor_arm_action_slice",
+                "visor_base_action_slice",
                 "visor_hand_action_slice",
                 "visor_arm_action_dim",
+                "visor_base_action_dim",
                 "visor_hand_action_dim",
+                "visor_tactile_num_force",
+                "visor_tactile_num_contact",
                 "visor_gate_components",
                 "visor_tactile_warmup_steps",
+                "visor_aux_warmup_steps",
+                "visor_aux_delay_steps",
+                "visor_gate_mode",
+                "visor_tactile_align_mode",
+                "visor_use_readout_fed_gates",
+                "visor_use_visual_supervision",
+                "visor_visual_waypoints",
+                "visor_visual_dim",
+                "visor_loss_weight_visual",
+                "visor_visual_vq_tokens",
+                "visor_visual_gt_level",
                 "visor_detach_tactile_for_gate",
                 "visor_iht_tokens",
                 "visor_hidden_dim",
                 "visor_loss_weight_tactile",
                 "visor_contact_loss_weight",
+                "visor_use_tactile_supervision",
                 "tune_visor",
                 "component_projector_dims",
                 "component_loss_weights",
@@ -238,6 +317,32 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             ):
                 if hasattr(self.config.model, adaptive_field):
                     setattr(model_cfg, adaptive_field, getattr(self.config.model, adaptive_field))
+            for joint_field in (
+                "use_joint_dual_branch",
+                "decouple_base_arm",
+                "mot_inpaint_tokens",
+                "joint_train_mode",
+                "joint_flux_model_path",
+                "joint_flux_future_delta",
+                "joint_flux_resolution",
+                "joint_flux_mask_mode",
+                "joint_flux_logit_mean",
+                "joint_flux_logit_std",
+                "joint_phase1_ratio",
+                "joint_alpha_phase1",
+                "joint_beta_phase1",
+                "joint_alpha_phase2",
+                "joint_beta_phase2",
+                "joint_visor_aux_delay_steps",
+                "joint_visor_visual_weight_phase1",
+                "joint_visor_visual_weight_phase2",
+                "joint_visor_tactile_weight_phase1",
+                "joint_visor_tactile_weight_phase2",
+                "max_steps",
+            ):
+                if hasattr(self.config.model, joint_field):
+                    setattr(model_cfg, joint_field, getattr(self.config.model, joint_field))
+            model_cfg.max_steps = self.config.training.max_steps
             model, loading_info = AutoModel.from_pretrained(
                 checkpoint,
                 config=model_cfg,
@@ -261,6 +366,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             use_adaptive = getattr(model.config, "use_adaptive_component_head", False)
             use_factored = getattr(model.config, "use_component_factored_head", False)
             use_visor = getattr(model.config, "use_visor", False)
+            use_vt = getattr(model.config, "use_vt_closed_loop", False)
             other_missing = [
                 k
                 for k in missing_keys
@@ -269,6 +375,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 and not (use_adaptive and _is_adaptive_action_head_key(k))
                 and not (use_factored and _is_component_factored_decoder_key(k))
                 and not (use_visor and _is_visor_key(k))
+                and not (use_vt and _is_vt_closed_loop_key(k))
             ]
             if use_adaptive:
                 unexpected_keys = [k for k in unexpected_keys if not _is_legacy_action_head_key(k)]
@@ -318,6 +425,14 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 ensure_motion_gate(
                     visual, motion_cfg, text_hidden_size=text_hidden_size
                 )
+                finalize_motion_trainable(
+                    model.backbone,
+                    tune_visual=getattr(model.config, "tune_visual", False),
+                    tune_motion=getattr(model.config, "tune_motion", True),
+                    trainable_fp32=getattr(
+                        model.config, "backbone_trainable_params_fp32", True
+                    ),
+                )
             errors = []
             if other_missing:
                 errors.append(f"Missing keys ({len(other_missing)}): {other_missing}")
@@ -336,6 +451,8 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 self.config.model,
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
             )
+            if getattr(self.config.model, "use_joint_dual_branch", False):
+                model.config.max_steps = self.config.training.max_steps
 
         logging.debug(f"Model Config: {model.config}")
         with run_or_wait_on_rank0(label="final_model_config.json write") as is_rank0:
@@ -360,6 +477,38 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
     def _get_embodiment_id_mapping(self) -> dict[str, int]:
         return None
+
+    def _joint_processor_kwargs(self) -> dict:
+        mc = self.model_config
+        kwargs: dict = {}
+        if getattr(mc, "use_joint_dual_branch", False):
+            kwargs.update(
+                {
+                    "joint_dual_branch": True,
+                    "joint_flux_future_delta": mc.joint_flux_future_delta,
+                    "joint_flux_resolution": mc.joint_flux_resolution,
+                    "joint_flux_mask_mode": mc.joint_flux_mask_mode,
+                    "joint_build_flux_batch": getattr(mc, "joint_train_mode", "simultaneous").lower()
+                    not in ("gr00t_only", "visor_only"),
+                    "decouple_base_arm": bool(getattr(mc, "decouple_base_arm", False)),
+                    "visor_base_action_slice": getattr(mc, "visor_base_action_slice", (7, 11)),
+                }
+            )
+        elif getattr(mc, "use_vt_closed_loop", False):
+            kwargs["decouple_base_arm"] = bool(getattr(mc, "decouple_base_arm", False))
+            kwargs["visor_base_action_slice"] = getattr(mc, "visor_base_action_slice", (7, 11))
+            if getattr(mc, "vt_build_flux_batch", False) or getattr(mc, "vt_use_flux_teacher", False):
+                kwargs["vt_build_flux_batch"] = True
+                kwargs["joint_build_flux_batch"] = True
+                kwargs["joint_flux_future_delta"] = int(getattr(mc, "vt_flux_future_delta", 5))
+                kwargs["joint_flux_resolution"] = int(getattr(mc, "vt_flux_resolution", 256))
+                kwargs["joint_flux_mask_mode"] = str(getattr(mc, "vt_flux_mask_mode", "keep_reference"))
+            logging.info(
+                "VT processor flags: vt_build_flux_batch=%s joint_build_flux_batch=%s",
+                kwargs.get("vt_build_flux_batch", False),
+                kwargs.get("joint_build_flux_batch", False),
+            )
+        return kwargs
 
     def _create_dataset(self, save_cfg_dir: Path):
         """Create appropriate dataset based on task and mode."""
@@ -394,6 +543,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,
                 use_mean_std=self.model_config.use_mean_std,
+                **self._joint_processor_kwargs(),
                 **self.transformers_loading_kwargs,
             )
         else:
@@ -425,6 +575,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,
                 use_mean_std=self.model_config.use_mean_std,
+                visor_visual_gt_level=getattr(
+                    self.model_config, "visor_visual_gt_level", "flow"
+                ),
+                **self._joint_processor_kwargs(),
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
             )
 
@@ -437,6 +591,18 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     json.dump({k: str(v) for k, v in vars(processor).items()}, f, indent=2)
 
         self.processor = processor
+        if getattr(self.model_config, "use_joint_dual_branch", False):
+            if not getattr(processor, "joint_dual_branch", False):
+                raise RuntimeError(
+                    "use_joint_dual_branch=True but processor.joint_dual_branch=False — "
+                    "FLUX batch will never be built. Check Gr00tN1d7Processor.from_pretrained "
+                    "override_keys include joint_dual_branch."
+                )
+            logging.info(
+                "Joint processor flags: joint_dual_branch=%s joint_build_flux_batch=%s",
+                processor.joint_dual_branch,
+                getattr(processor, "joint_build_flux_batch", None),
+            )
         dataset_factory = DatasetFactory(config=self.config)
         train_dataset, eval_dataset = dataset_factory.build(processor=self.processor)
 

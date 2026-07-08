@@ -465,14 +465,32 @@ class ShardedMixtureDataset(IterableDataset):
             self.worker_shard_sampling_schedule = self.filter_shard_sample_schedule()
             self.curr_shard_index = -1
 
-        print(f"Rank {self.rank}, Worker {self.worker_id}: Caching shard...")
         next_dataset_idx, next_shard_idx = self.worker_shard_sampling_schedule[
             self.curr_shard_index + 1
         ]
+        dataset = self.datasets[next_dataset_idx]
+        shard_samples = dataset.get_shard_length(next_shard_idx)
+        shard_total = len(dataset)
+        print(
+            f"Rank {self.rank}, Worker {self.worker_id}: Caching shard "
+            f"{next_shard_idx + 1}/{shard_total} (dataset {next_dataset_idx}, "
+            f"~{shard_samples} samples)...",
+            flush=True,
+        )
         # Submit background loading job
         self._cache_job = self._executor.submit(
-            self.datasets[next_dataset_idx].get_shard, next_shard_idx
+            self._load_shard_for_cache, next_dataset_idx, next_shard_idx
         )
+
+    def _load_shard_for_cache(self, dataset_idx: int, shard_idx: int) -> list:
+        """Load one shard with per-sample progress logs for monitoring."""
+        dataset = self.datasets[dataset_idx]
+        shard_total = len(dataset)
+        progress_label = (
+            f"Rank {self.rank}, Worker {self.worker_id}: "
+            f"shard {shard_idx + 1}/{shard_total} (dataset {dataset_idx})"
+        )
+        return dataset.get_shard(shard_idx, progress_label=progress_label)
 
     def finish_cache_shard(self):
         """Wait for the background caching job to complete and retrieve the shard."""

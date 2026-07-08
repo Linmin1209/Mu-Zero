@@ -45,6 +45,13 @@ import numpy as np
 import pandas as pd
 
 from gr00t.data.types import ModalityConfig
+from gr00t.data.dataset.lerobot_v3 import (
+    is_lerobot_v3,
+    load_v3_episodes_metadata,
+    load_v3_tasks_map,
+    resolve_v3_data_parquet_path,
+    resolve_v3_video_parquet_path,
+)
 from gr00t.utils.initial_actions import INITIAL_ACTIONS_FILENAME, load_initial_actions
 from gr00t.utils.video_utils import get_frames_by_indices
 
@@ -58,7 +65,18 @@ LEROBOT_MODALITY_FILENAME = "modality.json"
 LEROBOT_STATS_FILE_NAME = "stats.json"
 LEROBOT_RELATIVE_STATS_FILE_NAME = "relative_stats.json"
 
-ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask", "tactile", "tactile_future"]
+ALLOWED_MODALITIES = [
+    "video",
+    "state",
+    "action",
+    "language",
+    "mask",
+    "tactile",
+    "tactile_future",
+    "video_future_manip",
+    "video_future_nav",
+    "visual_future",
+]
 DEFAULT_COLUMN_NAMES = {
     "state": "observation.state",
     "action": "action",
@@ -160,17 +178,22 @@ class LeRobotEpisodeLoader:
         info_path = meta_dir / LEROBOT_INFO_FILENAME
         with open(info_path, "r") as f:
             self.info_meta = json.load(f)
+        self._lerobot_v3 = is_lerobot_v3(self.info_meta)
 
-        # Load episode metadata (one episode per line)
-        episodes_path = meta_dir / LEROBOT_EPISODES_FILENAME
-        with open(episodes_path, "r") as f:
-            self.episodes_metadata = [json.loads(line) for line in f]
+        if self._lerobot_v3:
+            self.episodes_metadata = load_v3_episodes_metadata(self.dataset_path)
+            self.tasks_map = load_v3_tasks_map(self.dataset_path)
+        else:
+            # Load episode metadata (one episode per line)
+            episodes_path = meta_dir / LEROBOT_EPISODES_FILENAME
+            with open(episodes_path, "r") as f:
+                self.episodes_metadata = [json.loads(line) for line in f]
 
-        # Load task descriptions and create mapping
-        tasks_path = meta_dir / LEROBOT_TASKS_FILENAME
-        with open(tasks_path, "r") as f:
-            tasks_data = [json.loads(line) for line in f]
-            self.tasks_map = {task["task_index"]: task["task"] for task in tasks_data}
+            # Load task descriptions and create mapping
+            tasks_path = meta_dir / LEROBOT_TASKS_FILENAME
+            with open(tasks_path, "r") as f:
+                tasks_data = [json.loads(line) for line in f]
+                self.tasks_map = {task["task_index"]: task["task"] for task in tasks_data}
 
         # Load modality structure information
         modality_path = meta_dir / LEROBOT_MODALITY_FILENAME
@@ -361,12 +384,22 @@ class LeRobotEpisodeLoader:
             Processed DataFrame with all modality data
         """
         # Load raw parquet data using chunking pattern
-        chunk_idx = episode_index // self.chunk_size
-        parquet_filename = self.data_path_pattern.format(
-            episode_chunk=chunk_idx, episode_index=episode_index
-        )
-        parquet_path = self.dataset_path / parquet_filename
-        original_df = pd.read_parquet(parquet_path)
+        if self._lerobot_v3:
+            ep_meta = self.episodes_metadata[episode_index]
+            parquet_path = resolve_v3_data_parquet_path(
+                self.dataset_path, self.info_meta, ep_meta
+            )
+            original_df = pd.read_parquet(parquet_path)
+            start = int(ep_meta["dataset_from_index"])
+            end = int(ep_meta["dataset_to_index"])
+            original_df = original_df.iloc[start : end + 1].reset_index(drop=True)
+        else:
+            chunk_idx = episode_index // self.chunk_size
+            parquet_filename = self.data_path_pattern.format(
+                episode_chunk=chunk_idx, episode_index=episode_index
+            )
+            parquet_path = self.dataset_path / parquet_filename
+            original_df = pd.read_parquet(parquet_path)
         loaded_df = pd.DataFrame()
 
         # Process language annotations (convert task indices to task strings)
@@ -381,9 +414,14 @@ class LeRobotEpisodeLoader:
                     f"Key {subkey} not found in language modality"
                 )
                 original_key = self.modality_meta["annotation"][subkey].get("original_key", key)
-                loaded_df[f"language.{key}"] = original_df[original_key].apply(
-                    lambda x: self.tasks_map[x]
-                )
+                if original_key == "task_index":
+                    loaded_df[f"language.{key}"] = original_df[original_key].apply(
+                        lambda x: self.tasks_map[int(x)]
+                    )
+                else:
+                    loaded_df[f"language.{key}"] = original_df[original_key].apply(
+                        lambda x: self.tasks_map[x]
+                    )
 
         # Extract joint groups for state and action modalities
         for modality_type in ["state", "action"]:
@@ -400,6 +438,15 @@ class LeRobotEpisodeLoader:
         if "tactile" in self.modality_configs:
             for key in self.modality_configs["tactile"].modality_keys:
                 col = f"tactile.{key}"
+                if col not in original_df.columns:
+                    raise KeyError(
+                        f"{col} not found in parquet; available: {list(original_df.columns)}"
+                    )
+                loaded_df[col] = original_df[col]
+
+        if "visual_future" in self.modality_configs:
+            for key in self.modality_configs["visual_future"].modality_keys:
+                col = f"visual_future.{key}"
                 if col not in original_df.columns:
                     raise KeyError(
                         f"{col} not found in parquet; available: {list(original_df.columns)}"
@@ -441,13 +488,19 @@ class LeRobotEpisodeLoader:
                 f"Original key {original_key} not found in feature config"
             )
 
-            # Construct video file path using pattern
-            video_filename = self.video_path_pattern.format(
-                episode_chunk=chunk_idx,
-                video_key=original_key,
-                episode_index=episode_index,
-            )
-            video_path = self.dataset_path / video_filename
+            if self._lerobot_v3:
+                ep_meta = self.episodes_metadata[episode_index]
+                video_path = resolve_v3_video_parquet_path(
+                    self.dataset_path, self.info_meta, ep_meta, original_key
+                )
+            else:
+                # Construct video file path using pattern
+                video_filename = self.video_path_pattern.format(
+                    episode_chunk=chunk_idx,
+                    video_key=original_key,
+                    episode_index=episode_index,
+                )
+                video_path = self.dataset_path / video_filename
 
             # Decode video frames at specified timestamps
             video_data[image_key] = get_frames_by_indices(

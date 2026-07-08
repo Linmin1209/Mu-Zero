@@ -177,6 +177,51 @@ def _scalar_from_outputs(outputs: Any, key: str) -> float | None:
 class Gr00tTrainer(Trainer):
     """Trainer that bypasses torch dataloader and makes data collator async."""
 
+    @staticmethod
+    def _sanitize_model_gradients(model) -> None:
+        for param in model.parameters():
+            if param.grad is not None:
+                param.grad = torch.nan_to_num(
+                    param.grad, nan=0.0, posinf=0.0, neginf=0.0
+                )
+
+    def clip_grad_norm(self, parameters, max_norm, norm_type=2):
+        self._sanitize_model_gradients(self.model)
+        grad_norm = super().clip_grad_norm(parameters, max_norm, norm_type=norm_type)
+        if torch.is_tensor(grad_norm) and not torch.isfinite(grad_norm):
+            return torch.zeros((), device=grad_norm.device, dtype=grad_norm.dtype)
+        return grad_norm
+
+    def create_optimizer(self):
+        opt_model = self.model
+        if hasattr(opt_model, "module"):
+            opt_model = opt_model.module
+
+        gate_scale = float(getattr(opt_model.config, "motion_gate_lr_scale", 1.0))
+        if gate_scale == 1.0:
+            return super().create_optimizer()
+
+        gate_params: list[torch.nn.Parameter] = []
+        other_params: list[torch.nn.Parameter] = []
+        for name, param in opt_model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "motion_gate" in name:
+                gate_params.append(param)
+            else:
+                other_params.append(param)
+
+        if not gate_params:
+            return super().create_optimizer()
+
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args)
+        gate_lr = self.args.learning_rate * gate_scale
+        param_groups = [
+            {"params": other_params},
+            {"params": gate_params, "lr": gate_lr},
+        ]
+        return optimizer_cls(param_groups, **optimizer_kwargs)
+
     def __init__(
         self,
         *args: Any,
@@ -301,6 +346,19 @@ class Gr00tTrainer(Trainer):
             return_outputs=True,
             num_items_in_batch=num_items_in_batch,
         )
+
+        if not torch.isfinite(loss):
+            logging.warning(
+                "Step %d — non-finite loss (%s); zeroing loss for this step",
+                self.state.global_step,
+                loss.detach().float().item() if loss.numel() == 1 else "non-scalar",
+            )
+            for p in model.parameters():
+                if p.requires_grad:
+                    loss = p.sum() * 0.0
+                    break
+            else:
+                loss = torch.zeros((), device=loss.device, dtype=loss.dtype)
         # import ipdb; ipdb.set_trace()
         # # save the model's embedding for the first step
         # input_embeddings = model.get_input_embeddings().weight.data.cpu()
@@ -319,7 +377,19 @@ class Gr00tTrainer(Trainer):
             visor_metrics: dict[str, float] = {}
             for key in (
                 "flow_loss",
+                "weighted_action_loss",
+                "future_loss",
+                "flux_loss",
                 "tactile_loss",
+                "recovery_loss",
+                "router_loss",
+                "intent_diversity_loss",
+                "weighted_future_loss",
+                "weighted_flux_loss",
+                "weighted_tactile_loss",
+                "weighted_recovery_loss",
+                "weighted_router_loss",
+                "weighted_intent_diversity_loss",
                 "visor_refine_active_rate",
                 "visor_coupling_lambda",
                 "visor_coupling_scale",
@@ -334,13 +404,24 @@ class Gr00tTrainer(Trainer):
             if visor_metrics:
                 self.log(visor_metrics)
                 logging.info(
-                    "Step %d — flow_loss=%.6f tactile_loss=%.6f "
-                    "contact_rate=%s force_step_rate=%s",
+                    "Step %d — total=%.6f action(w=%.6f) flow=%.6f future(w=%.6f)=%.6f "
+                    "flux(w=%.6f)=%.6f tactile(w=%.6f)=%.6f router(w=%.6f)=%.6f "
+                    "intent_div(w=%.6f)=%.6f recovery=%.6f",
                     self.state.global_step,
+                    loss.detach().float().item() if loss.numel() == 1 else float("nan"),
+                    visor_metrics.get("weighted_action_loss", float("nan")),
                     visor_metrics.get("flow_loss", float("nan")),
+                    visor_metrics.get("weighted_future_loss", float("nan")),
+                    visor_metrics.get("future_loss", float("nan")),
+                    visor_metrics.get("weighted_flux_loss", float("nan")),
+                    visor_metrics.get("flux_loss", float("nan")),
+                    visor_metrics.get("weighted_tactile_loss", float("nan")),
                     visor_metrics.get("tactile_loss", float("nan")),
-                    visor_metrics.get("visor_contact_rate", "n/a"),
-                    visor_metrics.get("visor_force_step_rate", "n/a"),
+                    visor_metrics.get("weighted_router_loss", float("nan")),
+                    visor_metrics.get("router_loss", float("nan")),
+                    visor_metrics.get("weighted_intent_diversity_loss", float("nan")),
+                    visor_metrics.get("intent_diversity_loss", float("nan")),
+                    visor_metrics.get("recovery_loss", float("nan")),
                 )
 
         # --------------------------------------------------------------

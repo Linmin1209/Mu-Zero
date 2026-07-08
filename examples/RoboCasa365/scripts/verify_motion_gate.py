@@ -73,14 +73,14 @@ def test_motion_fusion_gate() -> None:
     MotionFusionGate = qm.MotionFusionGate
 
     B, D = 4, 128
-    gate = MotionFusionGate(D, hidden_dim=32)
+    gate = MotionFusionGate(D, hidden_dim=32, init_bias=0.0, g_min=0.0, g_max=0.8)
     text = torch.randn(B, D)
     vision = torch.randn(B, D)
     temporal = torch.randn(B, D)
     out = gate(text, vision, temporal)
     assert out.shape == (B, 1)
-    assert (out > 0).all() and (out < 1).all()
-    assert out.mean().item() > 0.8
+    assert (out >= 0).all() and (out <= 0.8).all()
+    assert abs(out.mean().item() - 0.4) < 0.15
     print("[ok] MotionFusionGate forward")
 
 

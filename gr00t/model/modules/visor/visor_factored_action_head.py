@@ -18,6 +18,9 @@ from gr00t.model.modules.component_action.component_factored_action_head import 
 from gr00t.model.modules.visor.visor import (
     VisorModule,
     build_asymmetric_sa_mask,
+    compute_visor_tactile_training_loss,
+    dit_accepts_sa_self_attention_mask,
+    expand_asymmetric_sa_mask,
     resolve_sensor_tactile,
 )
 
@@ -42,6 +45,7 @@ def build_visor_factored_action_head(base_cls: type):
                 getattr(config, "visor_detach_tactile_for_gate", True)
             )
             self.register_buffer("_visor_train_step", torch.zeros((), dtype=torch.long), persistent=False)
+            self._dit_accepts_sa_mask = dit_accepts_sa_self_attention_mask(self.model)
 
             self.visor = VisorModule(
                 input_embedding_dim=self.input_embedding_dim,
@@ -62,6 +66,8 @@ def build_visor_factored_action_head(base_cls: type):
                 ),
                 use_semantic_gate=bool(getattr(config, "visor_use_semantic_gate", True)),
                 language_dim=config.backbone_embedding_dim,
+                tactile_num_force=int(getattr(config, "visor_tactile_num_force", 2)),
+                tactile_num_contact=int(getattr(config, "visor_tactile_num_contact", 1)),
             )
             logger.info(
                 "VisorFactoredActionHead (T-Rex sensor): tau_split=%.2f iht_tokens=%d "
@@ -87,6 +93,21 @@ def build_visor_factored_action_head(base_cls: type):
 
         def _get_tactile_gt(self, action_input) -> torch.Tensor | None:
             return getattr(action_input, "tactile_gt", None)
+
+        def _get_tactile_mask(self, action_input) -> torch.Tensor | None:
+            return getattr(action_input, "tactile_mask", None)
+
+        def _get_tactile_supervision_gt(
+            self,
+            action_input,
+            *,
+            device: torch.device,
+            dtype: torch.dtype,
+        ) -> torch.Tensor | None:
+            tactile_gt = self._get_tactile_gt(action_input)
+            if tactile_gt is None:
+                return None
+            return tactile_gt[:, : self.action_horizon].to(device=device, dtype=dtype)
 
         def _resolve_tactile_seq(
             self,
@@ -136,9 +157,7 @@ def build_visor_factored_action_head(base_cls: type):
         def _expand_sa_mask(
             self, sa_mask: torch.Tensor, batch_size: int
         ) -> torch.Tensor:
-            if sa_mask.shape[0] == 1:
-                sa_mask = sa_mask.expand(batch_size, -1, -1)
-            return sa_mask.unsqueeze(1)
+            return expand_asymmetric_sa_mask(sa_mask, batch_size)
 
         def _run_dit(
             self,
@@ -151,25 +170,19 @@ def build_visor_factored_action_head(base_cls: type):
             return_all_hidden_states: bool,
         ):
             vl_attn_mask = backbone_output.backbone_attention_mask
-            if self.config.use_alternate_vl_dit:
-                return self.model(
-                    hidden_states=sa_embs,
-                    encoder_hidden_states=vl_embeds,
-                    encoder_attention_mask=vl_attn_mask,
-                    timestep=t_discretized,
-                    return_all_hidden_states=return_all_hidden_states,
-                    image_mask=backbone_output.image_mask,
-                    backbone_attention_mask=backbone_output.backbone_attention_mask,
-                    sa_self_attention_mask=sa_self_attention_mask,
-                )
-            return self.model(
+            dit_kwargs = dict(
                 hidden_states=sa_embs,
                 encoder_hidden_states=vl_embeds,
                 encoder_attention_mask=vl_attn_mask,
                 timestep=t_discretized,
                 return_all_hidden_states=return_all_hidden_states,
-                sa_self_attention_mask=sa_self_attention_mask,
             )
+            if self.config.use_alternate_vl_dit:
+                dit_kwargs["image_mask"] = backbone_output.image_mask
+                dit_kwargs["backbone_attention_mask"] = backbone_output.backbone_attention_mask
+            if sa_self_attention_mask is not None and self._dit_accepts_sa_mask:
+                dit_kwargs["sa_self_attention_mask"] = sa_self_attention_mask
+            return self.model(**dit_kwargs)
 
         def _visor_sa_mask(self, device: torch.device, dtype: torch.dtype, batch_size: int):
             sa_mask = build_asymmetric_sa_mask(
@@ -278,13 +291,24 @@ def build_visor_factored_action_head(base_cls: type):
             else:
                 flow_loss = (per_elem_loss * scaled_mask).sum() / mask_sum
             loss = flow_loss
-            tactile_loss = torch.zeros((), device=device, dtype=loss.dtype)
 
             refine_active = self.visor.refine_active(t).float().mean()
-            tactile_stats = {"vq_commit_loss": vq_commit.detach().reshape(())}
-            if vq_commit is not None and self.visor.vq_commit_weight > 0:
-                tactile_loss = self.visor.vq_commit_weight * vq_commit * coupling_scale
-                loss = loss + tactile_loss
+            hidden_action = model_output[:, 1 : 1 + self.action_horizon]
+            tactile_gt_supervision = self._get_tactile_supervision_gt(
+                action_input, device=device, dtype=noisy_trajectory.dtype
+            )
+            use_tactile_sup = bool(getattr(self.config, "visor_use_tactile_supervision", True))
+            tactile_loss, tactile_stats = compute_visor_tactile_training_loss(
+                self.visor,
+                hidden_action=hidden_action,
+                tactile_gt=tactile_gt_supervision,
+                vq_commit=vq_commit,
+                coupling_lambda=coupling_lambda,
+                coupling_scale=coupling_scale,
+                enabled=use_tactile_sup and self.training,
+                tactile_mask=self._get_tactile_mask(action_input),
+            )
+            loss = loss + tactile_loss
 
             return {
                 "loss": loss,
@@ -294,8 +318,8 @@ def build_visor_factored_action_head(base_cls: type):
                 "action_mask": action_mask,
                 "backbone_features": vl_embeds,
                 "state_features": state_features,
-                "tactile_pred": tactile_seq.detach(),
-                "visor_tactile_source": "sensor",
+                "tactile_pred": self.visor.predict_tactile_from_hidden(hidden_action).detach(),
+                "visor_tactile_source": "readout",
                 "visor_refine_active_rate": refine_active.detach(),
                 "visor_coupling_lambda": coupling_lambda.mean().detach(),
                 "visor_coupling_scale": torch.tensor(coupling_scale, device=device),
